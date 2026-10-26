@@ -13,6 +13,8 @@ Small systems utilities that are too useful to leave as shell snippets.
 
 The plug/unplug timers are persisted across daemon restarts and hibernation. Charge-limit support is runtime-probed: the generic Linux `charge_control_end_threshold` ABI is preferred, with the Acer `acer-wmi-battery` health-mode ABI supported when present. Unsupported hardware is logged and left alone.
 
+On Acer systems without the generic power-supply threshold ABI, [`acer-wmi-battery`](https://github.com/frederik-h/acer-wmi-battery) can expose Acer's firmware health mode as `/sys/bus/wmi/drivers/acer-wmi-battery/health_mode`. This path is hardware-verified on the Swift SF314-42: its firmware advertises WMI GUID `79772EC5-04B1-4BFD-843C-61E7F77B6CC9`, reports health mode as supported, and accepts enable/disable transitions. A DKMS installation is appropriate until the equivalent driver is available in the running kernel.
+
 ### Important semantics
 
 `sync=disabled` tells ZFS to acknowledge synchronous writes before they are committed to stable storage. A crash or power loss can therefore lose acknowledged writes. This utility exists for systems where that trade-off is deliberate.
