@@ -1,0 +1,11 @@
+poll_interval_seconds = 10
+sync_disable_above_percent = 40
+sync_restore_value = "standard"
+plugged_limit_after_hours = 48
+unplugged_reset_after_minutes = 60
+charge_limit_percent = 80
+full_charge_percent = 100
+hibernate_grace_seconds = 10
+charge_reapply_seconds = 300
+state_path = "/var/lib/random-utils/laptop-policy-state.json"
+zfs_pools = []

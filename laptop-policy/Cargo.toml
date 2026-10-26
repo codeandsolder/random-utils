@@ -1,0 +1,17 @@
+[package]
+name = "laptop-policy"
+version = "0.1.0"
+description = "Laptop build-node power and storage policy daemon"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+anyhow = "1.0.100"
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.145"
+toml = "0.9.8"
+
+[lints]
+workspace = true

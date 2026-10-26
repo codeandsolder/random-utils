@@ -1,0 +1,19 @@
+[Unit]
+Description=Laptop power, ZFS sync, hibernate and charge-limit policy
+After=systemd-logind.service
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/laptop-policy --config /etc/random-utils/laptop-policy.toml
+Restart=on-failure
+RestartSec=5s
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectHome=read-only
+ProtectSystem=full
+StateDirectory=random-utils
+StateDirectoryMode=0755
+ReadWritePaths=/var/lib/random-utils
+
+[Install]
+WantedBy=multi-user.target
