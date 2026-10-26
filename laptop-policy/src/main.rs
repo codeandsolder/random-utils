@@ -713,7 +713,7 @@ fn unix_now() -> Result<u64> {
         .map(|duration| duration.as_secs())
 }
 
-fn elapsed_at_least(now: u64, since: u64, required: u64) -> bool {
+const fn elapsed_at_least(now: u64, since: u64, required: u64) -> bool {
     now.saturating_sub(since) >= required
 }
 
