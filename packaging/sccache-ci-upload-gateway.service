@@ -10,6 +10,7 @@ DynamicUser=yes
 EnvironmentFile=/etc/sccache/garage-laptop.env
 Environment=SCCACHE_UPLOAD_GATEWAY_LISTEN=127.0.0.1:3915
 Environment=SCCACHE_UPLOAD_GATEWAY_MAX_BYTES=1073741824
+Environment=RCLONE_CONFIG=/dev/null
 Environment=RCLONE_CONFIG_SCCACHE_TYPE=s3
 Environment=RCLONE_CONFIG_SCCACHE_PROVIDER=Other
 Environment=RCLONE_CONFIG_SCCACHE_ENV_AUTH=true
