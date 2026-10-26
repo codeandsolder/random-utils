@@ -1,0 +1,36 @@
+[Unit]
+Description=Write-only gateway for trusted sccache CI Garage uploads
+After=network-online.target garage-sccache.service
+Wants=network-online.target
+Requires=garage-sccache.service
+
+[Service]
+Type=simple
+DynamicUser=yes
+EnvironmentFile=/etc/sccache/garage-laptop.env
+Environment=SCCACHE_UPLOAD_GATEWAY_LISTEN=127.0.0.1:3915
+Environment=SCCACHE_UPLOAD_GATEWAY_MAX_BYTES=1073741824
+Environment=RCLONE_CONFIG_SCCACHE_TYPE=s3
+Environment=RCLONE_CONFIG_SCCACHE_PROVIDER=Other
+Environment=RCLONE_CONFIG_SCCACHE_ENV_AUTH=true
+Environment=RCLONE_CONFIG_SCCACHE_ENDPOINT=http://127.0.0.1:3912
+Environment=RCLONE_CONFIG_SCCACHE_REGION=garage-laptop
+ExecStart=/usr/local/libexec/sccache-ci-upload-gateway
+Restart=on-failure
+RestartSec=1
+NoNewPrivileges=yes
+PrivateDevices=yes
+PrivateTmp=yes
+ProtectHome=yes
+ProtectSystem=strict
+ProtectKernelLogs=yes
+ProtectKernelModules=yes
+ProtectKernelTunables=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_INET AF_INET6
+RestrictNamespaces=yes
+LockPersonality=yes
+CapabilityBoundingSet=
+
+[Install]
+WantedBy=multi-user.target
