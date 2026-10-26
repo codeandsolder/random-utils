@@ -38,12 +38,3 @@ Install the release binary as `/usr/local/bin/laptop-policy`, copy the example c
 `systemd-logind` must not independently suspend on lid close, otherwise it can race the daemon before the daemon decides whether an external display is attached. The supplied [`packaging/80-laptop-policy-logind.conf`](packaging/80-laptop-policy-logind.conf) makes the daemon the owner of lid-close policy.
 
 The supplied [`packaging/80-laptop-policy-sleep.conf`](packaging/80-laptop-policy-sleep.conf) explicitly enables hibernation. If a host previously masked `sleep.target` or `hibernate.target`, those two targets must be unmasked; `suspend.target`, `hybrid-sleep.target`, and `suspend-then-hibernate.target` may remain masked.
-
-
-## sccache-ci-upload-gateway
-
-`sccache-ci-upload-gateway` is a deliberately narrow HTTP ingress for trusted CI jobs that need to add L0 cache objects to a Garage-backed shared sccache store without receiving S3 credentials.
-
-The gateway accepts only `GET /healthz` and `PUT /v1/sccache-object/a/b/c/<64-lowercase-hex>`. Object paths are validated against the normalized sccache key layout, requests require `Content-Length`, headers and object size are bounded, and payloads are streamed to a local `rclone rcat` process. The Garage credentials remain in the host service environment and are never returned over HTTP.
-
-The supplied systemd units bind the gateway to loopback and expose it through a separate tailnet socket proxy. They assume the local Garage S3 endpoint is `127.0.0.1:3912` and the shared cache lives in bucket/prefix `sccache/rust`; adjust the environment or unit overrides if deploying elsewhere.
