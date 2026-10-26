@@ -298,8 +298,18 @@ fn run() -> io::Result<()> {
     for connection in listener.incoming() {
         match connection {
             Ok(stream) => {
-                if let Err(error) = handle_connection(stream, &remote_base, max_object_bytes) {
-                    eprintln!("upload gateway request failed: {error}");
+                let connection_remote_base = remote_base.clone();
+                let spawn_result = std::thread::Builder::new()
+                    .name("sccache-ci-upload".to_owned())
+                    .spawn(move || {
+                        if let Err(error) =
+                            handle_connection(stream, &connection_remote_base, max_object_bytes)
+                        {
+                            eprintln!("upload gateway request failed: {error}");
+                        }
+                    });
+                if let Err(error) = spawn_result {
+                    eprintln!("upload gateway thread spawn failed: {error}");
                 }
             }
             Err(error) => eprintln!("upload gateway accept failed: {error}"),
