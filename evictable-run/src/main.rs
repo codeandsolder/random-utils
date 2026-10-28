@@ -150,7 +150,7 @@ fn build_systemd_run(args: &Args, cwd: &Path, user: Option<&OsStr>) -> Command {
     command
 }
 
-fn usage() -> &'static str {
+const fn usage() -> &'static str {
     "Usage: evictable-run [--user USER] [--cwd DIR] [--detach] [--unit NAME] -- COMMAND [ARG...]\n\
      \n\
      Launch COMMAND in evictable.slice with cgroup and per-process idle scheduling.\n\
