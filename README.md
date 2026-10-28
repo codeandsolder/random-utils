@@ -2,6 +2,26 @@
 
 Small systems utilities that are too useful to leave as shell snippets.
 
+## crawl-killer
+
+`crawl-killer` is a deliberately blunt Linux cleanup utility for accidental filesystem traversals that outlive their usefulness. Each invocation scans `/proc` and sends `SIGKILL` to matching processes at least five minutes old. The default target set is `ack`, `ag`, `bfs`, `du`, `fd`, `fdfind`, `fgrep`, `find`, `grep`, `rgrep`, `rg`, `ripgrep`, and `tree`; long-running transfer or mutation tools such as `rsync`, `tar`, `cp`, and `rm` are intentionally not included.
+
+The process age is derived from `/proc/<pid>/stat` using the kernel clock tick rate, and the process identity is re-read immediately before signalling to reduce PID-reuse races. A process blocked in uninterruptible I/O keeps the `SIGKILL` pending and exits when the kernel allows it to resume.
+
+Useful manual modes:
+
+```bash
+crawl-killer --dry-run
+crawl-killer --max-age-seconds 600
+crawl-killer --max-age-seconds 300 --name grep --name find
+```
+
+Supplying one or more `--name` options replaces the default target set. The supplied systemd timer runs the one-shot service every 30 seconds as root, so the effective lifetime limit is roughly 5:00–5:30:
+
+```bash
+systemctl enable --now crawl-killer.timer
+```
+
 ## laptop-policy
 
 `laptop-policy` is a Linux policy daemon for laptops that are also used as unattended build nodes. It currently manages four related policies:

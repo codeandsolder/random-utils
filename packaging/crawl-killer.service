@@ -1,0 +1,21 @@
+[Unit]
+Description=Kill stale filesystem crawler processes
+Documentation=https://github.com/codeandsolder/random-utils
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/crawl-killer
+User=root
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+CapabilityBoundingSet=CAP_KILL
+IPAddressDeny=any

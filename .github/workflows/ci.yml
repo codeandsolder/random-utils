@@ -18,11 +18,11 @@ jobs:
       contents: read
     uses: codeandsolder/ci-workflows/.github/workflows/rust-sccache.yml@main
     with:
-      rust-toolchain: "1.99.0"
+      rust-toolchain: "1.99.1"
       rust-components: "clippy rustfmt"
       rustflags: "-C target-cpu=x86-64-v2"
       command: >-
-        cargo +1.99.0 fmt --all -- --check &&
-        CARGO_BUILD_WARNINGS=deny cargo +1.99.0 check --locked --workspace --all-targets &&
-        CARGO_BUILD_WARNINGS=deny cargo +1.99.0 clippy --locked --workspace --all-targets -- -D warnings &&
-        cargo +1.99.0 test --locked --workspace
+        cargo +1.99.1 fmt --all -- --check &&
+        CARGO_BUILD_WARNINGS=deny cargo +1.99.1 check --locked --workspace --all-targets &&
+        CARGO_BUILD_WARNINGS=deny cargo +1.99.1 clippy --locked --workspace --all-targets -- -D warnings &&
+        cargo +1.99.1 test --locked --workspace

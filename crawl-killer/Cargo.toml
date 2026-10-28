@@ -1,0 +1,15 @@
+[package]
+name = "crawl-killer"
+version = "0.1.0"
+description = "Kill accidentally long-running filesystem crawler processes"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+anyhow = "1.0.100"
+nix = { version = "0.31.3", features = ["feature", "signal"] }
+
+[lints]
+workspace = true
