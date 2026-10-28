@@ -5,6 +5,7 @@ After=systemd-logind.service
 [Service]
 Type=simple
 ExecStart=/usr/local/bin/laptop-policy --config /etc/random-utils/laptop-policy.toml
+EnvironmentFile=-/etc/random-utils/telemetry.env
 Restart=on-failure
 RestartSec=5s
 NoNewPrivileges=yes

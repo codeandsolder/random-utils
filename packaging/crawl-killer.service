@@ -5,6 +5,9 @@ Documentation=https://github.com/codeandsolder/random-utils
 [Service]
 Type=oneshot
 ExecStart=/usr/local/bin/crawl-killer
+EnvironmentFile=-/etc/random-utils/telemetry.env
+StateDirectory=random-utils
+StateDirectoryMode=0755
 User=root
 NoNewPrivileges=yes
 ProtectSystem=strict
@@ -19,3 +22,4 @@ LockPersonality=yes
 MemoryDenyWriteExecute=yes
 CapabilityBoundingSet=CAP_KILL
 IPAddressDeny=any
+IPAddressAllow=127.0.0.1/8 ::1/128

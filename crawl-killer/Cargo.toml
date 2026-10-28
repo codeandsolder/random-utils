@@ -8,6 +8,7 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+random-utils-observability = { path = "../observability" }
 anyhow = "1.0.100"
 nix = { version = "0.31.3", features = ["feature", "signal"] }
 

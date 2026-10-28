@@ -5,14 +5,19 @@ use std::ffi::OsString;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
+use std::process::{Command, ExitCode, Output};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, anyhow, bail};
+use random_utils_observability::{
+    Metrics, init_logging,
+    tracing::{error, info},
+};
 use serde::{Deserialize, Serialize};
 
 const DEFAULT_CONFIG_PATH: &str = "/etc/random-utils/laptop-policy.toml";
+const METRICS_SPOOL: &str = "/var/lib/random-utils/laptop-policy-metrics-spool";
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -243,7 +248,18 @@ struct Args {
     dry_run: bool,
 }
 
-fn main() -> Result<()> {
+fn main() -> ExitCode {
+    init_logging();
+    match run_main() {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(error) => {
+            error!(error = ?error, "laptop-policy failed");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+fn run_main() -> Result<()> {
     let args = parse_args()?;
     let config = load_config(&args.config_path)?;
     config.validate()?;
@@ -251,6 +267,7 @@ fn main() -> Result<()> {
     let mut backend = ChargeBackend::detect();
 
     let pools = resolve_zfs_pools(&config)?;
+    let mut metrics = Metrics::from_env("laptop-policy", "laptop_policy", Path::new(METRICS_SPOOL));
     if pools.is_empty() {
         log("no ZFS pool selected; sync policy is disabled".to_owned());
     } else {
@@ -288,8 +305,18 @@ fn main() -> Result<()> {
             args.dry_run,
         )?;
         save_state(&config.state_path, &state, args.dry_run)?;
+        metrics.publish_snapshot(render_metrics(MetricContext {
+            snapshot: &snapshot,
+            state: &state,
+            backend: backend.as_ref(),
+            pools: &pools,
+            hibernate_candidate_since,
+            config: &config,
+            dry_run: args.dry_run,
+        }));
 
         if args.once {
+            metrics.flush();
             break;
         }
         thread::sleep(Duration::from_secs(config.poll_interval_seconds));
@@ -753,12 +780,92 @@ fn output_to_stdout(program: &str, output: Output) -> Result<String> {
 }
 
 fn log(message: impl std::fmt::Display) {
-    eprintln!("laptop-policy: {message}");
+    info!(event = %message, "policy event");
+}
+
+#[derive(Clone, Copy)]
+struct MetricContext<'a> {
+    snapshot: &'a Snapshot,
+    state: &'a PersistentState,
+    backend: Option<&'a ChargeBackend>,
+    pools: &'a [String],
+    hibernate_candidate_since: Option<Instant>,
+    config: &'a Config,
+    dry_run: bool,
+}
+
+fn render_metrics(context: MetricContext<'_>) -> String {
+    let MetricContext {
+        snapshot,
+        state,
+        backend,
+        pools,
+        hibernate_candidate_since,
+        config,
+        dry_run,
+    } = context;
+    let battery_known = snapshot.battery_percent.is_some();
+    let external_power_known = snapshot.external_power.is_some();
+    let lid_known = snapshot.lid_closed.is_some();
+    let sync_intent_known = snapshot.battery_percent.is_some() && !pools.is_empty();
+    let sync_disabled_desired = snapshot
+        .battery_percent
+        .is_some_and(|percent| percent > config.sync_disable_above_percent);
+    let power_source_since = match state.last_power_source {
+        Some(PowerSource::External) => state.plugged_since_unix,
+        Some(PowerSource::Battery) => state.unplugged_since_unix,
+        None => None,
+    }
+    .unwrap_or(0);
+    let backend_kind = match backend {
+        None => 0_u8,
+        Some(ChargeBackend::Generic(_)) => 1,
+        Some(ChargeBackend::AcerHealthMode(_)) => 2,
+    };
+
+    format!(
+        concat!(
+            "laptop_policy_battery_percent {}\n",
+            "laptop_policy_battery_percent_known {}\n",
+            "laptop_policy_external_power {}\n",
+            "laptop_policy_external_power_known {}\n",
+            "laptop_policy_lid_closed {}\n",
+            "laptop_policy_lid_closed_known {}\n",
+            "laptop_policy_external_display_connected {}\n",
+            "laptop_policy_charge_limited {}\n",
+            "laptop_policy_charge_backend_kind {}\n",
+            "laptop_policy_power_source_since_unixtime {}\n",
+            "laptop_policy_zfs_pool_count {}\n",
+            "laptop_policy_zfs_sync_intent_known {}\n",
+            "laptop_policy_zfs_sync_disabled_desired {}\n",
+            "laptop_policy_hibernate_candidate {}\n",
+            "laptop_policy_up 1\n",
+            "laptop_policy_dry_run {}\n"
+        ),
+        snapshot.battery_percent.unwrap_or(0),
+        u8::from(battery_known),
+        u8::from(snapshot.external_power.unwrap_or(false)),
+        u8::from(external_power_known),
+        u8::from(snapshot.lid_closed.unwrap_or(false)),
+        u8::from(lid_known),
+        u8::from(snapshot.external_display_connected),
+        u8::from(state.charge_limited),
+        backend_kind,
+        power_source_since,
+        pools.len(),
+        u8::from(sync_intent_known),
+        u8::from(sync_disabled_desired),
+        u8::from(hibernate_candidate_since.is_some()),
+        u8::from(dry_run),
+    )
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{Config, PersistentState, PowerSource, elapsed_at_least, is_internal_connector};
+    use super::{
+        Config, MetricContext, PersistentState, PowerSource, Snapshot, elapsed_at_least,
+        is_internal_connector, render_metrics,
+    };
 
     #[test]
     fn charge_limit_requires_full_plugged_window() {
@@ -816,5 +923,35 @@ mod tests {
     fn elapsed_handles_clock_reversal_safely() {
         assert!(!elapsed_at_least(10, 20, 1));
         assert!(elapsed_at_least(20, 10, 10));
+    }
+
+    #[test]
+    fn metrics_snapshot_is_stable_for_unchanged_policy_state() {
+        let config = Config::default();
+        let snapshot = Snapshot {
+            battery_percent: Some(80),
+            external_power: Some(true),
+            lid_closed: Some(false),
+            external_display_connected: false,
+        };
+        let state = PersistentState {
+            last_power_source: Some(PowerSource::External),
+            plugged_since_unix: Some(1_234),
+            ..PersistentState::default()
+        };
+        let pools = vec!["rpool".to_owned()];
+        let rendered = render_metrics(MetricContext {
+            snapshot: &snapshot,
+            state: &state,
+            backend: None,
+            pools: &pools,
+            hibernate_candidate_since: None,
+            config: &config,
+            dry_run: false,
+        });
+        assert!(rendered.contains("laptop_policy_up 1\n"));
+        assert!(rendered.contains("laptop_policy_power_source_since_unixtime 1234\n"));
+        assert!(!rendered.contains("last_iteration"));
+        assert!(!rendered.contains("power_source_age"));
     }
 }

@@ -2,6 +2,14 @@
 
 Small systems utilities that are too useful to leave as shell snippets.
 
+## Observability
+
+The long-running utilities use native structured journald logging when available, with compact stderr fallback outside systemd. Optional metrics are delivered directly through [`lurkmoar`](https://github.com/codeandsolder/lurkmoar-rs) rather than exposing another scrape server. Configure `/etc/random-utils/telemetry.env` from [`packaging/telemetry.env.example`](packaging/telemetry.env.example); if `RANDOM_UTILS_METRICS_URL` is absent, metrics are disabled without affecting utility behavior.
+
+Metrics use `job=<utility>`, `instance=<hostname>`, and `resolution=raw`. Delivery is change-driven with a 60-second heartbeat, a one-second default HTTP timeout, and a bounded 10 MiB outage spool under `/var/lib/random-utils`. Telemetry failures are logged but never block the policy/killer behavior.
+
+`crawl-killer` reports each scan's match/kill/failure counts, oldest matched process age, scan duration, and last-run timestamp. `laptop-policy` reports battery/power/lid/display state, charge-limit state/backend, current power-source start time, ZFS policy intent, hibernate candidacy, and the lurkmoar delivery-health series.
+
 ## crawl-killer
 
 `crawl-killer` is a deliberately blunt Linux cleanup utility for accidental filesystem traversals that outlive their usefulness. Each invocation scans `/proc` and sends `SIGKILL` to matching processes at least five minutes old. The default target set is `ack`, `ag`, `bfs`, `du`, `fd`, `fdfind`, `fgrep`, `find`, `grep`, `rgrep`, `rg`, `ripgrep`, and `tree`; long-running transfer or mutation tools such as `rsync`, `tar`, `cp`, and `rm` are intentionally not included.

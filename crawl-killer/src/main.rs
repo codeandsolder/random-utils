@@ -4,7 +4,17 @@ use nix::{
     sys::signal::{Signal, kill},
     unistd::{Pid, SysconfVar, sysconf},
 };
-use std::{collections::BTreeSet, env, fs, io, process, time::Duration};
+use random_utils_observability::{
+    Metrics, init_logging,
+    tracing::{debug, error, info, warn},
+};
+use std::{
+    collections::BTreeSet,
+    env, fs, io,
+    path::Path,
+    process::{self, ExitCode},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+};
 
 const DEFAULT_MAX_AGE: Duration = Duration::from_secs(300);
 const DEFAULT_NAMES: &[&str] = &[
@@ -12,6 +22,7 @@ const DEFAULT_NAMES: &[&str] = &[
     "tree",
 ];
 const CMDLINE_LOG_LIMIT: usize = 400;
+const METRICS_SPOOL: &str = "/var/lib/random-utils/crawl-killer-metrics-spool";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Config {
@@ -32,13 +43,70 @@ struct ProcIdentity {
     start_ticks: u64,
 }
 
-fn main() -> Result<()> {
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct ScanStats {
+    matched: u64,
+    killed: u64,
+    failures: u64,
+    oldest_match_age: Duration,
+    scan_duration: Duration,
+    finished_unixtime: u64,
+}
+
+impl ScanStats {
+    fn prometheus(self, dry_run: bool) -> String {
+        format!(
+            concat!(
+                "crawl_killer_matched {}\n",
+                "crawl_killer_killed {}\n",
+                "crawl_killer_failures {}\n",
+                "crawl_killer_oldest_match_age_seconds {}\n",
+                "crawl_killer_scan_duration_seconds {}\n",
+                "crawl_killer_last_run_unixtime {}\n",
+                "crawl_killer_dry_run {}\n"
+            ),
+            self.matched,
+            self.killed,
+            self.failures,
+            self.oldest_match_age.as_secs_f64(),
+            self.scan_duration.as_secs_f64(),
+            self.finished_unixtime,
+            u8::from(dry_run),
+        )
+    }
+}
+
+fn main() -> ExitCode {
+    init_logging();
+    match real_main() {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(error) => {
+            error!(error = ?error, "crawl-killer failed");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+fn real_main() -> Result<()> {
     match parse_args(env::args().skip(1))? {
         Action::Help => {
             print_help();
             Ok(())
         }
-        Action::Run(config) => run(&config),
+        Action::Run(config) => {
+            let metrics =
+                Metrics::from_env("crawl-killer", "crawl_killer", Path::new(METRICS_SPOOL));
+            let stats = run(&config)?;
+            metrics.publish_now(&stats.prometheus(config.dry_run));
+            metrics.flush();
+            if stats.failures > 0 {
+                bail!(
+                    "failed to inspect or kill {} matching process(es)",
+                    stats.failures
+                );
+            }
+            Ok(())
+        }
     }
 }
 
@@ -111,19 +179,25 @@ fn print_help() {
     );
 }
 
-fn run(config: &Config) -> Result<()> {
+fn run(config: &Config) -> Result<ScanStats> {
+    let started = Instant::now();
     let uptime = read_uptime()?;
     let clock_ticks = clock_ticks_per_second()?;
     let own_pid = i32::try_from(process::id()).context("own PID does not fit in i32")?;
-    let mut matched = 0_u64;
-    let mut killed = 0_u64;
-    let mut failures = 0_u64;
+    let mut stats = ScanStats {
+        matched: 0,
+        killed: 0,
+        failures: 0,
+        oldest_match_age: Duration::ZERO,
+        scan_duration: Duration::ZERO,
+        finished_unixtime: 0,
+    };
 
     for entry in fs::read_dir("/proc").context("failed to read /proc")? {
         let entry = match entry {
             Ok(entry) => entry,
             Err(error) => {
-                eprintln!("crawl-killer: failed to read a /proc entry: {error}");
+                warn!(%error, "failed to read a /proc entry");
                 continue;
             }
         };
@@ -133,81 +207,124 @@ fn run(config: &Config) -> Result<()> {
         if pid == own_pid {
             continue;
         }
-
-        let identity = match read_identity(pid) {
-            Ok(identity) => identity,
-            Err(error) if transient_proc_error(&error) => continue,
-            Err(error) => {
-                eprintln!("crawl-killer: cannot inspect pid={pid}: {error}");
-                continue;
-            }
-        };
-        if !config.names.contains(&identity.comm) {
-            continue;
+        let outcome = inspect_process(config, pid, uptime, clock_ticks);
+        if outcome.matched {
+            stats.matched += 1;
+            stats.oldest_match_age = stats.oldest_match_age.max(outcome.age);
         }
+        stats.killed += u64::from(outcome.killed);
+        stats.failures += u64::from(outcome.failed);
+    }
 
-        let started_at = duration_from_ticks(identity.start_ticks, clock_ticks);
-        let age = uptime.saturating_sub(started_at);
-        if age < config.max_age {
-            continue;
+    stats.scan_duration = started.elapsed();
+    stats.finished_unixtime = unix_now();
+    if stats.matched > 0 || stats.failures > 0 || config.dry_run {
+        info!(
+            matched = stats.matched,
+            killed = stats.killed,
+            failures = stats.failures,
+            dry_run = config.dry_run,
+            scan_duration_seconds = stats.scan_duration.as_secs_f64(),
+            "scan complete"
+        );
+    } else {
+        debug!(
+            scan_duration_seconds = stats.scan_duration.as_secs_f64(),
+            "clean scan complete"
+        );
+    }
+    Ok(stats)
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct ProcessOutcome {
+    matched: bool,
+    killed: bool,
+    failed: bool,
+    age: Duration,
+}
+
+fn inspect_process(
+    config: &Config,
+    pid: i32,
+    uptime: Duration,
+    clock_ticks: u64,
+) -> ProcessOutcome {
+    let identity = match read_identity(pid) {
+        Ok(identity) => identity,
+        Err(error) if transient_proc_error(&error) => return ProcessOutcome::default(),
+        Err(error) => {
+            warn!(pid, %error, "cannot inspect process");
+            return ProcessOutcome::default();
         }
+    };
+    if !config.names.contains(&identity.comm) {
+        return ProcessOutcome::default();
+    }
 
-        matched += 1;
-        let cmdline = read_cmdline(pid);
-        if config.dry_run {
-            println!(
-                "would-kill pid={pid} age={}s comm={} cmd={cmdline}",
-                age.as_secs(),
-                identity.comm
+    let started_at = duration_from_ticks(identity.start_ticks, clock_ticks);
+    let age = uptime.saturating_sub(started_at);
+    if age < config.max_age {
+        return ProcessOutcome::default();
+    }
+
+    let mut outcome = ProcessOutcome {
+        matched: true,
+        age,
+        ..ProcessOutcome::default()
+    };
+    let cmdline = read_cmdline(pid);
+    if config.dry_run {
+        info!(
+            pid,
+            age_seconds = age.as_secs(),
+            comm = identity.comm,
+            cmdline,
+            action = "would_kill",
+            "stale crawler matched"
+        );
+        return outcome;
+    }
+
+    match read_identity(pid) {
+        Ok(current) if current == identity => {}
+        Ok(_) => {
+            info!(pid, "process identity changed during scan; skipping");
+            return outcome;
+        }
+        Err(error) if transient_proc_error(&error) => return outcome,
+        Err(error) => {
+            warn!(pid, %error, "cannot re-check process identity");
+            outcome.failed = true;
+            return outcome;
+        }
+    }
+
+    match kill(Pid::from_raw(pid), Signal::SIGKILL) {
+        Ok(()) => {
+            outcome.killed = true;
+            info!(
+                pid,
+                age_seconds = age.as_secs(),
+                comm = identity.comm,
+                cmdline,
+                action = "killed",
+                "stale crawler killed"
             );
-            continue;
         }
-
-        // PIDs can be recycled. Re-read the immutable process identity immediately before
-        // signalling so a process that exited during the scan is not confused with a new one.
-        match read_identity(pid) {
-            Ok(current) if current == identity => {}
-            Ok(_) => {
-                println!("skip pid={pid}: process identity changed during scan");
-                continue;
-            }
-            Err(error) if transient_proc_error(&error) => continue,
-            Err(error) => {
-                eprintln!("crawl-killer: cannot re-check pid={pid}: {error}");
-                failures += 1;
-                continue;
-            }
-        }
-
-        match kill(Pid::from_raw(pid), Signal::SIGKILL) {
-            Ok(()) => {
-                killed += 1;
-                println!(
-                    "killed pid={pid} age={}s comm={} cmd={cmdline}",
-                    age.as_secs(),
-                    identity.comm
-                );
-            }
-            Err(Errno::ESRCH) => {}
-            Err(error) => {
-                failures += 1;
-                eprintln!(
-                    "crawl-killer: failed to kill pid={pid} age={}s comm={}: {error}",
-                    age.as_secs(),
-                    identity.comm
-                );
-            }
+        Err(Errno::ESRCH) => {}
+        Err(error) => {
+            outcome.failed = true;
+            warn!(
+                pid,
+                age_seconds = age.as_secs(),
+                comm = identity.comm,
+                %error,
+                "failed to kill stale crawler"
+            );
         }
     }
-
-    println!(
-        "crawl-killer: matched={matched} killed={killed} dry_run={}",
-        config.dry_run
-    );
-    if failures > 0 {
-        bail!("failed to inspect or kill {failures} matching process(es)");
-    }
-    Ok(())
+    outcome
 }
 
 fn numeric_pid(name: &std::ffi::OsStr) -> Option<i32> {
@@ -323,6 +440,12 @@ fn read_cmdline(pid: i32) -> String {
     result
 }
 
+fn unix_now() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |duration| duration.as_secs())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -382,5 +505,22 @@ mod tests {
             })
         );
         Ok(())
+    }
+
+    #[test]
+    fn metrics_snapshot_contains_scan_state() {
+        let text = ScanStats {
+            matched: 2,
+            killed: 1,
+            failures: 0,
+            oldest_match_age: Duration::from_secs(600),
+            scan_duration: Duration::from_millis(250),
+            finished_unixtime: 1234,
+        }
+        .prometheus(false);
+        assert!(text.contains("crawl_killer_matched 2\n"));
+        assert!(text.contains("crawl_killer_killed 1\n"));
+        assert!(text.contains("crawl_killer_oldest_match_age_seconds 600\n"));
+        assert!(text.contains("crawl_killer_dry_run 0\n"));
     }
 }

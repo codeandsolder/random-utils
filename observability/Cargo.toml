@@ -1,0 +1,17 @@
+[package]
+name = "random-utils-observability"
+version = "0.1.0"
+description = "Shared logging and direct-push metrics for random-utils"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+lurkmoar = { git = "https://github.com/codeandsolder/lurkmoar-rs", rev = "b9bf595e99b6173c3719a1a5809f8e79e08f6ade" }
+tracing = "0.1.41"
+tracing-journald = "0.3.2"
+tracing-subscriber = { version = "0.3.20", default-features = false, features = ["fmt", "registry", "smallvec"] }
+
+[lints]
+workspace = true
