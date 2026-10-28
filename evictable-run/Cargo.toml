@@ -1,0 +1,13 @@
+[package]
+name = "evictable-run"
+version = "0.1.0"
+description = "Launch explicitly evictable work in a systemd idle slice"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+
+[lints]
+workspace = true

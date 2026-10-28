@@ -10,6 +10,30 @@ Metrics use `job=<utility>`, `instance=<hostname>`, and `resolution=raw`. Delive
 
 `crawl-killer` reports only crawler-specific scan outcomes (matches/kills/failures, oldest matched age and scan duration). `laptop-policy` reports only policy-specific intent/candidate state (desired charge ceiling, ZFS sync intent and hibernate candidacy). Generic laptop hardware state belongs in `rs-linux-exporter`; the direct producers retain only their own lurkmoar delivery-health series.
 
+
+## evictable-run
+
+`evictable-run` launches explicitly disposable-performance work in the system-level `evictable.slice`. The slice uses cgroup-v2 idle CPU scheduling (`CPUWeight=idle`) and minimum proportional I/O weight, so work remains fully work-conserving when the machine is otherwise idle but yields to ordinary user sessions and system services under contention. Payloads also get `Nice=19`, `CPUSchedulingPolicy=idle`, and `IOSchedulingClass=idle` so priority remains low inside the slice itself.
+
+This is intentionally an explicit class rather than an inference from process names or `nice` values. A `nice=19` process in a normal logind session still belongs to that session's CPU cgroup and can otherwise receive a substantial group-scheduler share.
+
+Install [`packaging/evictable.slice`](packaging/evictable.slice) as `/etc/systemd/system/evictable.slice`, run `systemctl daemon-reload`, and install the release binary as `/usr/local/bin/evictable-run`. Creating a top-level systemd transient service requires root; the payload itself runs as the selected unprivileged user.
+
+Foreground work waits for completion and pipes stdout/stderr back to the caller:
+
+```bash
+sudo evictable-run --user jan -- cargo test
+```
+
+Long-running work can be detached into a transient service. Its stdout/stderr go to the journal and `systemd-run` prints the generated unit name unless `--unit` supplies one:
+
+```bash
+sudo evictable-run --user jan --cwd /path/to/project --detach --unit corpus-refresh -- \
+  uv run --no-project --python 3 python scripts/update-corpus-progress.py ...
+```
+
+Transient services get systemd's normal login environment for the selected user rather than arbitrary caller environment variables. Commands that need additional environment should make that configuration explicit rather than relying on an SSH shell's ambient state.
+
 ## crawl-killer
 
 `crawl-killer` is a deliberately blunt Linux cleanup utility for accidental filesystem traversals that outlive their usefulness. Each invocation scans `/proc` and sends `SIGKILL` to matching processes at least five minutes old. The default target set is `ack`, `ag`, `bfs`, `du`, `fd`, `fdfind`, `fgrep`, `find`, `grep`, `rgrep`, `rg`, `ripgrep`, and `tree`; long-running transfer or mutation tools such as `rsync`, `tar`, `cp`, and `rm` are intentionally not included.

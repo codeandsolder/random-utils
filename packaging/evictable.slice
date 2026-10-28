@@ -1,0 +1,8 @@
+[Unit]
+Description=Explicitly evictable background work
+
+[Slice]
+# CPUWeight=idle maps to cgroup-v2 cpu.idle=1: this slice yields to normal
+# sibling slices while remaining work-conserving when spare CPU exists.
+CPUWeight=idle
+IOWeight=1
