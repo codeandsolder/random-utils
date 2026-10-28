@@ -13,7 +13,7 @@ use std::{
     env, fs, io,
     path::Path,
     process::{self, ExitCode},
-    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant},
 };
 
 const DEFAULT_MAX_AGE: Duration = Duration::from_secs(300);
@@ -50,7 +50,6 @@ struct ScanStats {
     failures: u64,
     oldest_match_age: Duration,
     scan_duration: Duration,
-    finished_unixtime: u64,
 }
 
 impl ScanStats {
@@ -62,7 +61,6 @@ impl ScanStats {
                 "crawl_killer_failures {}\n",
                 "crawl_killer_oldest_match_age_seconds {}\n",
                 "crawl_killer_scan_duration_seconds {}\n",
-                "crawl_killer_last_run_unixtime {}\n",
                 "crawl_killer_dry_run {}\n"
             ),
             self.matched,
@@ -70,7 +68,6 @@ impl ScanStats {
             self.failures,
             self.oldest_match_age.as_secs_f64(),
             self.scan_duration.as_secs_f64(),
-            self.finished_unixtime,
             u8::from(dry_run),
         )
     }
@@ -190,7 +187,6 @@ fn run(config: &Config) -> Result<ScanStats> {
         failures: 0,
         oldest_match_age: Duration::ZERO,
         scan_duration: Duration::ZERO,
-        finished_unixtime: 0,
     };
 
     for entry in fs::read_dir("/proc").context("failed to read /proc")? {
@@ -217,7 +213,6 @@ fn run(config: &Config) -> Result<ScanStats> {
     }
 
     stats.scan_duration = started.elapsed();
-    stats.finished_unixtime = unix_now();
     if stats.matched > 0 || stats.failures > 0 || config.dry_run {
         info!(
             matched = stats.matched,
@@ -440,12 +435,6 @@ fn read_cmdline(pid: i32) -> String {
     result
 }
 
-fn unix_now() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |duration| duration.as_secs())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -515,12 +504,12 @@ mod tests {
             failures: 0,
             oldest_match_age: Duration::from_secs(600),
             scan_duration: Duration::from_millis(250),
-            finished_unixtime: 1234,
         }
         .prometheus(false);
         assert!(text.contains("crawl_killer_matched 2\n"));
         assert!(text.contains("crawl_killer_killed 1\n"));
         assert!(text.contains("crawl_killer_oldest_match_age_seconds 600\n"));
+        assert!(!text.contains("last_run_unixtime"));
         assert!(text.contains("crawl_killer_dry_run 0\n"));
     }
 }

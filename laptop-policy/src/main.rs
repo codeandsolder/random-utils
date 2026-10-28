@@ -2,6 +2,7 @@
 
 use std::env;
 use std::ffi::OsString;
+use std::fmt::Write as _;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -308,7 +309,6 @@ fn run_main() -> Result<()> {
         metrics.publish_snapshot(render_metrics(MetricContext {
             snapshot: &snapshot,
             state: &state,
-            backend: backend.as_ref(),
             pools: &pools,
             hibernate_candidate_since,
             config: &config,
@@ -787,7 +787,6 @@ fn log(message: impl std::fmt::Display) {
 struct MetricContext<'a> {
     snapshot: &'a Snapshot,
     state: &'a PersistentState,
-    backend: Option<&'a ChargeBackend>,
     pools: &'a [String],
     hibernate_candidate_since: Option<Instant>,
     config: &'a Config,
@@ -798,66 +797,36 @@ fn render_metrics(context: MetricContext<'_>) -> String {
     let MetricContext {
         snapshot,
         state,
-        backend,
         pools,
         hibernate_candidate_since,
         config,
         dry_run,
     } = context;
-    let battery_known = snapshot.battery_percent.is_some();
-    let external_power_known = snapshot.external_power.is_some();
-    let lid_known = snapshot.lid_closed.is_some();
-    let sync_intent_known = snapshot.battery_percent.is_some() && !pools.is_empty();
-    let sync_disabled_desired = snapshot
-        .battery_percent
-        .is_some_and(|percent| percent > config.sync_disable_above_percent);
-    let power_source_since = match state.last_power_source {
-        Some(PowerSource::External) => state.plugged_since_unix,
-        Some(PowerSource::Battery) => state.unplugged_since_unix,
-        None => None,
-    }
-    .unwrap_or(0);
-    let backend_kind = match backend {
-        None => 0_u8,
-        Some(ChargeBackend::Generic(_)) => 1,
-        Some(ChargeBackend::AcerHealthMode(_)) => 2,
+    let charge_limit_desired = if state.charge_limited {
+        config.charge_limit_percent
+    } else {
+        config.full_charge_percent
     };
-
-    format!(
+    let mut text = format!(
         concat!(
-            "laptop_policy_battery_percent {}\n",
-            "laptop_policy_battery_percent_known {}\n",
-            "laptop_policy_external_power {}\n",
-            "laptop_policy_external_power_known {}\n",
-            "laptop_policy_lid_closed {}\n",
-            "laptop_policy_lid_closed_known {}\n",
-            "laptop_policy_external_display_connected {}\n",
-            "laptop_policy_charge_limited {}\n",
-            "laptop_policy_charge_backend_kind {}\n",
-            "laptop_policy_power_source_since_unixtime {}\n",
-            "laptop_policy_zfs_pool_count {}\n",
-            "laptop_policy_zfs_sync_intent_known {}\n",
-            "laptop_policy_zfs_sync_disabled_desired {}\n",
+            "laptop_policy_charge_limit_desired_percent {}\n",
             "laptop_policy_hibernate_candidate {}\n",
-            "laptop_policy_up 1\n",
             "laptop_policy_dry_run {}\n"
         ),
-        snapshot.battery_percent.unwrap_or(0),
-        u8::from(battery_known),
-        u8::from(snapshot.external_power.unwrap_or(false)),
-        u8::from(external_power_known),
-        u8::from(snapshot.lid_closed.unwrap_or(false)),
-        u8::from(lid_known),
-        u8::from(snapshot.external_display_connected),
-        u8::from(state.charge_limited),
-        backend_kind,
-        power_source_since,
-        pools.len(),
-        u8::from(sync_intent_known),
-        u8::from(sync_disabled_desired),
+        charge_limit_desired,
         u8::from(hibernate_candidate_since.is_some()),
         u8::from(dry_run),
-    )
+    );
+    if !pools.is_empty()
+        && let Some(percent) = snapshot.battery_percent
+    {
+        let _ = writeln!(
+            text,
+            "laptop_policy_zfs_sync_disabled_desired {}",
+            u8::from(percent > config.sync_disable_above_percent)
+        );
+    }
+    text
 }
 
 #[cfg(test)]
@@ -943,15 +912,19 @@ mod tests {
         let rendered = render_metrics(MetricContext {
             snapshot: &snapshot,
             state: &state,
-            backend: None,
             pools: &pools,
             hibernate_candidate_since: None,
             config: &config,
             dry_run: false,
         });
-        assert!(rendered.contains("laptop_policy_up 1\n"));
-        assert!(rendered.contains("laptop_policy_power_source_since_unixtime 1234\n"));
-        assert!(!rendered.contains("last_iteration"));
-        assert!(!rendered.contains("power_source_age"));
+        assert!(rendered.contains("laptop_policy_charge_limit_desired_percent 100\n"));
+        assert!(rendered.contains("laptop_policy_zfs_sync_disabled_desired 1\n"));
+        assert!(rendered.contains("laptop_policy_hibernate_candidate 0\n"));
+        assert!(!rendered.contains("battery_percent"));
+        assert!(!rendered.contains("external_power"));
+        assert!(!rendered.contains("lid_closed"));
+        assert!(!rendered.contains("external_display"));
+        assert!(!rendered.contains("power_source_since"));
+        assert!(!rendered.contains("laptop_policy_up"));
     }
 }

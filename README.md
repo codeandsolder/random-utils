@@ -8,7 +8,7 @@ The long-running utilities use native structured journald logging when available
 
 Metrics use `job=<utility>`, `instance=<hostname>`, and `resolution=raw`. Delivery is change-driven with a 60-second heartbeat, a one-second default HTTP timeout, and a bounded 10 MiB outage spool under `/var/lib/random-utils`. Telemetry failures are logged but never block the policy/killer behavior.
 
-`crawl-killer` reports each scan's match/kill/failure counts, oldest matched process age, scan duration, and last-run timestamp. `laptop-policy` reports battery/power/lid/display state, charge-limit state/backend, current power-source start time, ZFS policy intent, hibernate candidacy, and the lurkmoar delivery-health series.
+`crawl-killer` reports only crawler-specific scan outcomes (matches/kills/failures, oldest matched age and scan duration). `laptop-policy` reports only policy-specific intent/candidate state (desired charge ceiling, ZFS sync intent and hibernate candidacy). Generic laptop hardware state belongs in `rs-linux-exporter`; the direct producers retain only their own lurkmoar delivery-health series.
 
 ## crawl-killer
 
