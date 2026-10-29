@@ -82,6 +82,7 @@ enum PowerSource {
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct PersistentState {
     last_power_source: Option<PowerSource>,
     plugged_since_unix: Option<u64>,
