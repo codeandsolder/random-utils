@@ -1,0 +1,13 @@
+[Unit]
+Description=Periodically update configured random utility packages
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=5min
+RandomizedDelaySec=1min
+AccuracySec=1min
+Persistent=true
+Unit=random-utils-update.service
+
+[Install]
+WantedBy=timers.target

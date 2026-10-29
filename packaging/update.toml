@@ -1,0 +1,46 @@
+# One systemd timer drives every package. Each package controls its own minimum
+# check interval, so adding a package does not require another service/timer pair.
+
+state_dir = "/var/lib/random-utils/updater"
+max_download_bytes = 536870912
+
+# Ordinary immutable GitHub Release package. The checksum asset can be a
+# per-file sha256 file or a shared GNU-style SHA256SUMS manifest.
+[[package]]
+name = "rs-linux-exporter"
+min_interval_seconds = 3600
+restart_units = ["rs-linux-exporter.service"]
+
+[package.source]
+type = "github-release"
+repo = "codeandsolder/rs-linux-exporter"
+
+[[package.artifact]]
+asset = "rs-linux-exporter-x86_64-linux-gnu"
+checksum_asset = "{asset}.sha256"
+destination = "/usr/local/bin/rs-linux-exporter"
+mode = 0o755
+owner = "root"
+group = "root"
+
+[[package.health]]
+type = "http"
+url = "http://127.0.0.1:23319/__updater_health"
+# Empty means any HTTP response proves that the new process reached its listener.
+statuses = []
+attempts = 60
+interval_ms = 1000
+timeout_seconds = 2
+
+# Escape hatch for packages with genuinely package-specific update semantics.
+# Their existing updater remains the implementation, but scheduling and fleet
+# inventory move into this one declarative manager.
+[[package]]
+name = "sccache"
+min_interval_seconds = 900
+
+[package.source]
+type = "command"
+program = "/usr/bin/systemctl"
+args = ["start", "sccache-release-update.service"]
+timeout_seconds = 900
