@@ -445,18 +445,18 @@ fn download_candidates<'a>(
         let asset = expand_template(&artifact.asset, &package.name, tag, None);
         let checksum_asset =
             expand_template(&artifact.checksum_asset, &package.name, tag, Some(&asset));
-        let checksum_text = if let Some(cached) = checksum_cache.get(&checksum_asset) {
-            cached.clone()
-        } else {
+        if !checksum_cache.contains_key(&checksum_asset) {
             let text = download_text(
                 agent,
                 &release_asset_url(repo, tag, &checksum_asset),
                 4 * 1024 * 1024,
             )?;
-            checksum_cache.insert(checksum_asset.clone(), text.clone());
-            text
-        };
-        let expected = parse_sha256_manifest(&checksum_text, &asset)?;
+            checksum_cache.insert(checksum_asset.clone(), text);
+        }
+        let checksum_text = checksum_cache
+            .get(&checksum_asset)
+            .context("checksum cache entry disappeared")?;
+        let expected = parse_sha256_manifest(checksum_text, &asset)?;
         let path = work_dir.join(format!("artifact-{index}"));
         download_file(
             agent,
@@ -743,7 +743,7 @@ fn run_chown(spec: &str, path: &Path) -> Result<()> {
         .status()
         .with_context(|| format!("run chown on {}", path.display()))?;
     if !status.success() {
-        bail!("chown {} {} failed with {status}", spec, path.display());
+        bail!("chown {spec} {} failed with {status}", path.display());
     }
     Ok(())
 }
@@ -827,13 +827,11 @@ fn run_command(spec: &CommandSpec, env: &[(String, String)]) -> Result<CommandOu
     let package = env
         .iter()
         .find(|(name, _)| name == "RANDOM_UTILS_UPDATE_PACKAGE")
-        .map(|(_, value)| value.as_str())
-        .unwrap_or_default();
+        .map_or("", |(_, value)| value.as_str());
     let tag = env
         .iter()
         .find(|(name, _)| name == "RANDOM_UTILS_UPDATE_TAG")
-        .map(|(_, value)| value.as_str())
-        .unwrap_or_default();
+        .map_or("", |(_, value)| value.as_str());
     let mut command = Command::new(&spec.program);
     command.args(
         spec.args
@@ -896,10 +894,14 @@ fn command_env(package: &Package, tag: Option<&str>) -> Vec<(String, String)> {
 }
 
 fn expand_template(value: &str, package: &str, tag: &str, asset: Option<&str>) -> String {
+    const PACKAGE_TOKEN: &str = concat!("{", "package", "}");
+    const TAG_TOKEN: &str = concat!("{", "tag", "}");
+    const ASSET_TOKEN: &str = concat!("{", "asset", "}");
+
     value
-        .replace("{package}", package)
-        .replace("{tag}", tag)
-        .replace("{asset}", asset.unwrap_or_default())
+        .replace(PACKAGE_TOKEN, package)
+        .replace(TAG_TOKEN, tag)
+        .replace(ASSET_TOKEN, asset.unwrap_or_default())
 }
 
 fn state_path(state_dir: &Path, package: &str) -> PathBuf {
