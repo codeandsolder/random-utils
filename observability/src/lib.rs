@@ -13,6 +13,7 @@ use tracing_subscriber::{
     util::SubscriberInitExt as _,
 };
 
+/// Re-export of `tracing` so utility binaries can use the same facade without a duplicate dependency.
 pub use tracing;
 
 const DEFAULT_HEARTBEAT: Duration = Duration::from_secs(60);
@@ -57,6 +58,10 @@ pub struct Metrics {
 }
 
 impl Metrics {
+    /// Build metrics from the `RANDOM_UTILS_METRICS_*` environment variables.
+    ///
+    /// If no metrics endpoint is configured, returns a disabled sink so callers can
+    /// keep instrumentation unconditional.
     #[must_use]
     pub fn from_env(job: &str, metric_prefix: &str, spool_dir: &Path) -> Self {
         let Ok(endpoint) = env::var("RANDOM_UTILS_METRICS_URL") else {
