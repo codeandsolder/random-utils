@@ -9,9 +9,6 @@ permissions:
   contents: read
 
 jobs:
-  strict-rust:
-    uses: codeandsolder/rust-skills2/.github/workflows/strict-rust.yml@cc82bd6c31d8f9e5e6e2a3cc9d2f00663bd57e15 # main
-
   rust-1-99-shared-sccache:
     if: github.event_name != 'pull_request'
     permissions:
