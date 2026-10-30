@@ -1,0 +1,16 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": [
+    "config:recommended",
+    "helpers:pinGitHubActionDigests"
+  ],
+  "dependencyDashboard": true,
+  "packageRules": [
+    {
+      "description": "Keep GitHub Actions and reusable workflows current as reviewed immutable pins",
+      "matchManagers": ["github-actions"],
+      "groupName": "GitHub Actions tooling",
+      "automerge": false
+    }
+  ]
+}
