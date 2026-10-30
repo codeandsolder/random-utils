@@ -26,3 +26,48 @@ jobs:
         CARGO_BUILD_WARNINGS=deny cargo +1.99.1 check --locked --workspace --all-targets &&
         CARGO_BUILD_WARNINGS=deny cargo +1.99.1 clippy --locked --workspace --all-targets -- -D warnings &&
         cargo +1.99.1 test --locked --workspace
+
+  release:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: [strict-rust, rust-1-99-shared-sccache]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.99.1"
+      - name: Build release artifacts
+        run: cargo +1.99.1 build --locked --release --workspace
+      - name: Assemble immutable release
+        run: |
+          set -euo pipefail
+          install -d dist
+          install -m 0755 target/release/random-utils-update dist/random-utils-update-x86_64-linux-gnu
+          install -m 0755 target/release/crawl-killer dist/crawl-killer-x86_64-linux-gnu
+          install -m 0755 target/release/evictable-run dist/evictable-run-x86_64-linux-gnu
+          install -m 0755 target/release/laptop-policy dist/laptop-policy-x86_64-linux-gnu
+          install -m 0644 packaging/update.toml dist/update.toml
+          install -m 0644 packaging/update.d/10-base.toml dist/10-base.toml
+          install -m 0644 packaging/random-utils-update.service dist/random-utils-update.service
+          install -m 0644 packaging/random-utils-update.timer dist/random-utils-update.timer
+          (
+            cd dist
+            for asset in *; do
+              sha256sum "$asset" >"$asset.sha256"
+            done
+          )
+      - name: Publish release for this main commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag="auto-${GITHUB_SHA}"
+          title="random-utils ${GITHUB_SHA::12}"
+          if gh release view "$tag" >/dev/null 2>&1; then
+            gh release upload "$tag" dist/* --clobber
+            gh release edit "$tag" --latest
+          else
+            gh release create "$tag" dist/* --title "$title" --notes "Automated immutable release for ${GITHUB_SHA}." --latest
+          fi

@@ -14,15 +14,19 @@ Metrics use `job=<utility>`, `instance=<hostname>`, and `resolution=raw`. Delive
 
 ## random-utils-update
 
-`random-utils-update` is the shared host updater for small tools that do not justify a bespoke package repository. One five-minute systemd timer drives a declarative `/etc/random-utils/update.toml`; each package has its own minimum check interval, so adding another managed binary does not create another service/timer pair. A backwards wall-clock jump makes packages immediately due rather than suppressing checks until the old timestamp catches up.
+`random-utils-update` is the shared host updater for small tools that do not justify a bespoke package repository. One five-minute systemd timer drives `/etc/random-utils/update.toml`; each package has its own minimum check interval, so adding another managed binary does not create another service/timer pair. A backwards wall-clock jump makes packages immediately due rather than suppressing checks until the old timestamp catches up.
+
+The root config is deliberately a small bootstrap. It may point at `/etc/random-utils/update.d`, whose `*.toml` fragments are loaded in lexical filename order and may contain packages only. Fleet-wide package inventory lives in `packaging/update.d/10-base.toml`; host-specific additions can live beside it without being overwritten. Duplicate package names across the root config and fragments are rejected.
 
 The native `github-release` source resolves GitHub's stable `releases/latest` redirect without consuming REST API quota, downloads one or more release artifacts, requires SHA-256 verification from either a per-asset checksum file or shared `SHA256SUMS`, and installs all artifacts as one transaction. Existing destinations are backed up first, replacement happens by same-directory atomic rename, ownership is preserved unless the config explicitly overrides it, and configured service restarts, post-update hooks, and health checks must all pass before state is committed. A failed activation restores every replaced file and restarts the old services.
+
+`random-utils` manages itself using the same mechanism. Every CI-clean push to `main` publishes a new immutable GitHub Release containing the updater, all workspace binaries, the bootstrap/base configs, systemd units, and per-asset SHA-256 files. The bootstrap's `random-utils` package atomically updates the updater binary, package inventory and its systemd units, reloads systemd, and rearms the timer. This closes the config-distribution loop: adding a fleet package to `packaging/update.d/10-base.toml` and merging it is enough for enrolled hosts to learn about it on their next self-update; no manual config copy is required.
 
 For genuinely package-specific rollout logic, a `command` source delegates the update while keeping scheduling and fleet inventory in the same config. This is intended for cases such as sccache where drain/protocol compatibility is real application logic rather than generic file installation. Command execution is argv-based, never a shell string, supports explicit success/defer exit codes and a timeout, and receives `RANDOM_UTILS_UPDATE_PACKAGE` / `RANDOM_UTILS_UPDATE_TAG` environment metadata.
 
 The updater also supports pre-update, post-update, rollback and health commands, HTTP health checks, systemd-active checks, package-specific intervals, `--package`, `--force`, `--dry-run`, and `--list`. State lives under `/var/lib/random-utils/updater`; the recorded tag is trusted only while the installed file hashes still match the committed state, so an accidentally replaced/corrupted binary is repaired even when the release tag itself did not change.
 
-See [`packaging/update.toml`](packaging/update.toml), [`packaging/random-utils-update.service`](packaging/random-utils-update.service), and [`packaging/random-utils-update.timer`](packaging/random-utils-update.timer). The example migrates the ordinary `rs-linux-exporter` release updater directly and delegates the sccache-specific rollout through its existing hardened updater.
+See [`packaging/update.toml`](packaging/update.toml), [`packaging/update.d/10-base.toml`](packaging/update.d/10-base.toml), [`packaging/random-utils-update.service`](packaging/random-utils-update.service), and [`packaging/random-utils-update.timer`](packaging/random-utils-update.timer).
 
 ## evictable-run
 

@@ -1,0 +1,37 @@
+# Fleet-wide packages. Host-specific additions belong in separate files under
+# /etc/random-utils/update.d; package names must remain unique across fragments.
+
+[[package]]
+name = "rs-linux-exporter"
+min_interval_seconds = 3600
+restart_units = ["rs-linux-exporter.service"]
+
+[package.source]
+type = "github-release"
+repo = "codeandsolder/rs-linux-exporter"
+
+[[package.artifact]]
+asset = "rs-linux-exporter-x86_64-linux-gnu"
+checksum_asset = "{asset}.sha256"
+destination = "/usr/local/bin/rs-linux-exporter"
+mode = 0o755
+owner = "root"
+group = "root"
+
+[[package.health]]
+type = "http"
+url = "http://127.0.0.1:23319/__updater_health"
+statuses = []
+attempts = 60
+interval_ms = 1000
+timeout_seconds = 2
+
+[[package]]
+name = "sccache"
+min_interval_seconds = 900
+
+[package.source]
+type = "command"
+program = "/usr/bin/systemctl"
+args = ["start", "sccache-release-update.service"]
+timeout_seconds = 900

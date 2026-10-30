@@ -1,19 +1,34 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 use serde::Deserialize;
 
 const DEFAULT_STATE_DIR: &str = "/var/lib/random-utils/updater";
 
+#[derive(Debug)]
+pub struct Config {
+    pub state_dir: PathBuf,
+    pub max_download_bytes: u64,
+    pub package: Vec<Package>,
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct Config {
+struct RootConfig {
     #[serde(default = "default_state_dir")]
-    pub state_dir: PathBuf,
+    state_dir: PathBuf,
     #[serde(default = "default_max_download_bytes")]
-    pub max_download_bytes: u64,
+    max_download_bytes: u64,
+    include_dir: Option<PathBuf>,
     #[serde(default)]
-    pub package: Vec<Package>,
+    package: Vec<Package>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ConfigFragment {
+    #[serde(default)]
+    package: Vec<Package>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -97,13 +112,56 @@ pub enum HealthCheck {
 }
 
 impl Config {
-    pub fn load(path: &std::path::Path) -> Result<Self> {
+    pub fn load(path: &Path) -> Result<Self> {
         let text = std::fs::read_to_string(path)
             .with_context(|| format!("read updater config {}", path.display()))?;
-        let config: Self = toml::from_str(&text)
+        let root: RootConfig = toml::from_str(&text)
             .with_context(|| format!("parse updater config {}", path.display()))?;
+
+        let mut config = Self {
+            state_dir: root.state_dir,
+            max_download_bytes: root.max_download_bytes,
+            package: root.package,
+        };
+        if let Some(include_dir) = root.include_dir {
+            config.load_fragments(&include_dir)?;
+        }
         config.validate()?;
         Ok(config)
+    }
+
+    fn load_fragments(&mut self, include_dir: &Path) -> Result<()> {
+        if !include_dir.is_absolute() {
+            bail!("include_dir must be absolute: {}", include_dir.display());
+        }
+        let entries = std::fs::read_dir(include_dir)
+            .with_context(|| format!("read config fragment directory {}", include_dir.display()))?;
+        let mut paths = Vec::new();
+        for entry in entries {
+            let entry =
+                entry.with_context(|| format!("read entry in {}", include_dir.display()))?;
+            let path = entry.path();
+            if path.extension().is_none_or(|extension| extension != "toml") {
+                continue;
+            }
+            let file_type = entry
+                .file_type()
+                .with_context(|| format!("read file type for {}", path.display()))?;
+            if !file_type.is_file() {
+                bail!("config fragment must be a regular file: {}", path.display());
+            }
+            paths.push(path);
+        }
+        paths.sort();
+
+        for path in paths {
+            let text = std::fs::read_to_string(&path)
+                .with_context(|| format!("read updater config fragment {}", path.display()))?;
+            let fragment: ConfigFragment = toml::from_str(&text)
+                .with_context(|| format!("parse updater config fragment {}", path.display()))?;
+            self.package.extend(fragment.package);
+        }
+        Ok(())
     }
 
     fn validate(&self) -> Result<()> {
@@ -255,55 +313,126 @@ const fn default_health_timeout_seconds() -> u64 {
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+
+    use tempfile::tempdir;
+
     use super::Config;
 
-    #[test]
-    fn rejects_unknown_fields() {
-        let text = r#"
-            wat = true
-            [[package]]
-            name = "x"
-            [package.source]
-            type = "command"
-            program = "/bin/true"
-        "#;
-        let parsed = toml::from_str::<Config>(text);
-        assert!(parsed.is_err());
+    fn load_text(text: &str) -> anyhow::Result<Config> {
+        let dir = tempdir()?;
+        let path = dir.path().join("update.toml");
+        fs::write(&path, text)?;
+        Config::load(&path)
     }
 
     #[test]
-    fn rejects_command_package_transaction_fields() -> anyhow::Result<()> {
-        let text = r#"
-            [[package]]
-            name = "delegated"
-            restart_units = ["ignored.service"]
-            [package.source]
-            type = "command"
-            program = "/bin/true"
-        "#;
-        let config: Config = toml::from_str(text)?;
-        assert!(config.validate().is_err());
-        Ok(())
+    fn rejects_unknown_fields() {
+        let result = load_text(
+            r#"
+                wat = true
+                [[package]]
+                name = "x"
+                [package.source]
+                type = "command"
+                program = "/bin/true"
+            "#,
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn rejects_command_package_transaction_fields() {
+        let result = load_text(
+            r#"
+                [[package]]
+                name = "delegated"
+                restart_units = ["ignored.service"]
+                [package.source]
+                type = "command"
+                program = "/bin/true"
+            "#,
+        );
+        assert!(result.is_err());
     }
 
     #[test]
     fn parses_github_package() -> anyhow::Result<()> {
-        let text = r#"
-            [[package]]
-            name = "thing"
-            min_interval_seconds = 900
-            [package.source]
-            type = "github-release"
-            repo = "owner/repo"
-            [[package.artifact]]
-            asset = "thing-{tag}"
-            checksum_asset = "SHA256SUMS"
-            destination = "/usr/local/bin/thing"
-            mode = 0o755
-        "#;
-        let config: Config = toml::from_str(text)?;
-        config.validate()?;
+        let config = load_text(
+            r#"
+                [[package]]
+                name = "thing"
+                min_interval_seconds = 900
+                [package.source]
+                type = "github-release"
+                repo = "owner/repo"
+                [[package.artifact]]
+                asset = "thing-{tag}"
+                checksum_asset = "SHA256SUMS"
+                destination = "/usr/local/bin/thing"
+                mode = 0o755
+            "#,
+        )?;
         assert_eq!(config.package.len(), 1);
+        Ok(())
+    }
+
+    #[test]
+    fn loads_fragments_in_filename_order() -> anyhow::Result<()> {
+        let dir = tempdir()?;
+        let fragments = dir.path().join("fragments");
+        fs::create_dir(&fragments)?;
+        fs::write(
+            fragments.join("20-second.toml"),
+            r#"
+                [[package]]
+                name = "second"
+                [package.source]
+                type = "command"
+                program = "/bin/true"
+            "#,
+        )?;
+        fs::write(
+            fragments.join("10-first.toml"),
+            r#"
+                [[package]]
+                name = "first"
+                [package.source]
+                type = "command"
+                program = "/bin/true"
+            "#,
+        )?;
+        let root = format!(
+            "include_dir = {:?}\n",
+            fragments.to_string_lossy().into_owned()
+        );
+        let path = dir.path().join("update.toml");
+        fs::write(&path, root)?;
+
+        let config = Config::load(&path)?;
+        let names: Vec<_> = config
+            .package
+            .iter()
+            .map(|package| package.name.as_str())
+            .collect();
+        assert_eq!(names, ["first", "second"]);
+        Ok(())
+    }
+
+    #[test]
+    fn fragments_cannot_override_global_settings() -> anyhow::Result<()> {
+        let dir = tempdir()?;
+        let fragments = dir.path().join("fragments");
+        fs::create_dir(&fragments)?;
+        fs::write(fragments.join("10-bad.toml"), "max_download_bytes = 1\n")?;
+        let root = format!(
+            "include_dir = {:?}\n",
+            fragments.to_string_lossy().into_owned()
+        );
+        let path = dir.path().join("update.toml");
+        fs::write(&path, root)?;
+
+        assert!(Config::load(&path).is_err());
         Ok(())
     }
 }

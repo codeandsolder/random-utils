@@ -1,46 +1,75 @@
-# One systemd timer drives every package. Each package controls its own minimum
-# check interval, so adding a package does not require another service/timer pair.
+# Stable bootstrap config. This file owns updater-global settings and the
+# self-update package; fleet packages live in update.d fragments so a random-utils
+# release can update the manager and its package inventory in one transaction.
 
 state_dir = "/var/lib/random-utils/updater"
 max_download_bytes = 536870912
+include_dir = "/etc/random-utils/update.d"
 
-# Ordinary immutable GitHub Release package. The checksum asset can be a
-# per-file sha256 file or a shared GNU-style SHA256SUMS manifest.
 [[package]]
-name = "rs-linux-exporter"
-min_interval_seconds = 3600
-restart_units = ["rs-linux-exporter.service"]
+name = "random-utils"
+min_interval_seconds = 900
 
 [package.source]
 type = "github-release"
-repo = "codeandsolder/rs-linux-exporter"
+repo = "codeandsolder/random-utils"
 
 [[package.artifact]]
-asset = "rs-linux-exporter-x86_64-linux-gnu"
+asset = "random-utils-update-x86_64-linux-gnu"
 checksum_asset = "{asset}.sha256"
-destination = "/usr/local/bin/rs-linux-exporter"
+destination = "/usr/local/bin/random-utils-update"
 mode = 0o755
 owner = "root"
 group = "root"
 
-[[package.health]]
-type = "http"
-url = "http://127.0.0.1:23319/__updater_health"
-# Empty means any HTTP response proves that the new process reached its listener.
-statuses = []
-attempts = 60
-interval_ms = 1000
-timeout_seconds = 2
+[[package.artifact]]
+asset = "update.toml"
+checksum_asset = "{asset}.sha256"
+destination = "/etc/random-utils/update.toml"
+mode = 0o644
+owner = "root"
+group = "root"
 
-# Escape hatch for packages with genuinely package-specific update semantics.
-# Their existing updater remains the implementation, but scheduling and fleet
-# inventory move into this one declarative manager.
-[[package]]
-name = "sccache"
-min_interval_seconds = 900
+[[package.artifact]]
+asset = "10-base.toml"
+checksum_asset = "{asset}.sha256"
+destination = "/etc/random-utils/update.d/10-base.toml"
+mode = 0o644
+owner = "root"
+group = "root"
 
-[package.source]
-type = "command"
+[[package.artifact]]
+asset = "random-utils-update.service"
+checksum_asset = "{asset}.sha256"
+destination = "/etc/systemd/system/random-utils-update.service"
+mode = 0o644
+owner = "root"
+group = "root"
+
+[[package.artifact]]
+asset = "random-utils-update.timer"
+checksum_asset = "{asset}.sha256"
+destination = "/etc/systemd/system/random-utils-update.timer"
+mode = 0o644
+owner = "root"
+group = "root"
+
+[[package.post_update]]
 program = "/usr/bin/systemctl"
-args = ["start", "sccache-release-update.service"]
-timeout_seconds = 900
+args = ["daemon-reload"]
+timeout_seconds = 30
+
+[[package.post_update]]
+program = "/usr/bin/systemctl"
+args = ["try-restart", "random-utils-update.timer"]
+timeout_seconds = 30
+
+[[package.rollback]]
+program = "/usr/bin/systemctl"
+args = ["daemon-reload"]
+timeout_seconds = 30
+
+[[package.rollback]]
+program = "/usr/bin/systemctl"
+args = ["try-restart", "random-utils-update.timer"]
+timeout_seconds = 30
