@@ -55,6 +55,11 @@ owner = "root"
 group = "root"
 
 [[package.post_update]]
+program = "/usr/local/bin/random-utils-update"
+args = ["--config", "/etc/random-utils/update.toml", "--list"]
+timeout_seconds = 30
+
+[[package.post_update]]
 program = "/usr/bin/systemctl"
 args = ["daemon-reload"]
 timeout_seconds = 30
