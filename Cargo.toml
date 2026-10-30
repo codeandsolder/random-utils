@@ -1,5 +1,5 @@
 [workspace]
-members = ["crawl-killer", "evictable-run", "laptop-policy", "observability"]
+members = ["auto-updater", "crawl-killer", "evictable-run", "laptop-policy", "observability"]
 resolver = "3"
 
 [workspace.package]

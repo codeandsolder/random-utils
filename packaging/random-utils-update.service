@@ -1,0 +1,20 @@
+[Unit]
+Description=Update configured random utility packages
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/random-utils-update --config /etc/random-utils/update.toml
+StateDirectory=random-utils
+StateDirectoryMode=0750
+TimeoutStartSec=30min
+Nice=10
+IOSchedulingClass=idle
+PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+LockPersonality=yes
+RestrictRealtime=yes
