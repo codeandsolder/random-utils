@@ -237,7 +237,10 @@ fn run(config: &Config) -> Result<ScanStats> {
             continue;
         }
         match read_identity(pid) {
-            Ok(identity) => processes.push(ProcessSnapshot { pid, identity }),
+            Ok(identity) if identity.process_group > 0 && identity.session > 0 => {
+                processes.push(ProcessSnapshot { pid, identity });
+            }
+            Ok(_) => {}
             Err(error) if transient_proc_error(&error) => {}
             Err(error) => warn!(pid, %error, "cannot inspect process"),
         }
@@ -488,10 +491,6 @@ fn parse_proc_stat(stat: &str) -> Option<ProcIdentity> {
     let process_group = fields.next()?.parse::<i32>().ok()?;
     let session = fields.next()?.parse::<i32>().ok()?;
     let start_ticks = fields.nth(15)?.parse::<u64>().ok()?;
-    if process_group <= 0 || session <= 0 {
-        return None;
-    }
-
     Some(ProcIdentity {
         comm,
         process_group,
@@ -733,6 +732,16 @@ mod tests {
                 start_ticks: 4242,
             }
         );
+        Ok(())
+    }
+
+    #[test]
+    fn proc_stat_parser_accepts_kernel_thread_job_ids_for_quiet_skip() -> Result<()> {
+        let stat = "2 (kthreadd) S 0 0 0 0 -1 4194560 0 0 0 0 0 0 0 0 20 0 1 0 12345 0";
+        let parsed = parse_proc_stat(stat).context("failed to parse kernel-thread fixture")?;
+        assert_eq!(parsed.process_group, 0);
+        assert_eq!(parsed.session, 0);
+        assert_eq!(parsed.start_ticks, 12345);
         Ok(())
     }
 
