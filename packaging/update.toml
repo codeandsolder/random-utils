@@ -23,6 +23,14 @@ owner = "root"
 group = "root"
 
 [[package.artifact]]
+asset = "crawl-killer-x86_64-linux-gnu"
+checksum_asset = "{asset}.sha256"
+destination = "/usr/local/bin/crawl-killer"
+mode = 0o755
+owner = "root"
+group = "root"
+
+[[package.artifact]]
 asset = "update.toml"
 checksum_asset = "{asset}.sha256"
 destination = "/etc/random-utils/update.toml"

@@ -1,7 +1,7 @@
 use anyhow::{Context, Result, bail};
 use nix::{
     errno::Errno,
-    sys::signal::{Signal, kill},
+    sys::signal::{Signal, killpg},
     unistd::{Pid, SysconfVar, sysconf},
 };
 use random_utils_observability::{
@@ -9,9 +9,11 @@ use random_utils_observability::{
     tracing::{debug, error, info, warn},
 };
 use std::{
-    collections::BTreeSet,
-    env, fs, io,
-    path::Path,
+    collections::{BTreeMap, BTreeSet},
+    env,
+    fmt::Write as _,
+    fs, io,
+    path::{Path, PathBuf},
     process::{self, ExitCode},
     time::{Duration, Instant},
 };
@@ -23,6 +25,7 @@ const DEFAULT_NAMES: &[&str] = &[
 ];
 const CMDLINE_LOG_LIMIT: usize = 400;
 const METRICS_SPOOL: &str = "/var/lib/random-utils/crawl-killer-metrics-spool";
+const JOB_STATE_PATH: &str = "/var/lib/random-utils/crawl-killer-jobs-v1";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Config {
@@ -40,7 +43,35 @@ enum Action {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ProcIdentity {
     comm: String,
+    process_group: i32,
+    session: i32,
     start_ticks: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ProcessSnapshot {
+    pid: i32,
+    identity: ProcIdentity,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+struct JobKey {
+    process_group: i32,
+    session: i32,
+    leader_start_ticks: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ActiveJob {
+    key: JobKey,
+    oldest_crawler_start_ticks: u64,
+    representative: ProcessSnapshot,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CrawlJob {
+    active: ActiveJob,
+    first_seen_seconds: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -98,7 +129,7 @@ fn real_main() -> Result<()> {
             metrics.flush();
             if stats.failures > 0 {
                 bail!(
-                    "failed to inspect or kill {} matching process(es)",
+                    "failed to inspect or kill {} crawler job(s)",
                     stats.failures
                 );
             }
@@ -161,12 +192,12 @@ where
 
 fn print_help() {
     println!(
-        "crawl-killer — kill accidentally long-running filesystem crawlers\n\
+        "crawl-killer — kill accidentally long-running filesystem crawl jobs\n\
          \n\
          Usage: crawl-killer [OPTIONS]\n\
          \n\
          Options:\n\
-           --max-age-seconds N  Kill matching processes at least N seconds old [default: 300]\n\
+           --max-age-seconds N  Kill crawl jobs continuously containing a target for N seconds [default: 300]\n\
            --name NAME          Replace the default target set with repeated explicit names\n\
            --dry-run            Report matching processes without signalling them\n\
            -h, --help           Show this help\n\
@@ -180,7 +211,9 @@ fn run(config: &Config) -> Result<ScanStats> {
     let started = Instant::now();
     let uptime = read_uptime()?;
     let clock_ticks = clock_ticks_per_second()?;
+    let boot_id = read_boot_id()?;
     let own_pid = i32::try_from(process::id()).context("own PID does not fit in i32")?;
+    let mut processes = Vec::new();
     let mut stats = ScanStats {
         matched: 0,
         killed: 0,
@@ -203,13 +236,39 @@ fn run(config: &Config) -> Result<ScanStats> {
         if pid == own_pid {
             continue;
         }
-        let outcome = inspect_process(config, pid, uptime, clock_ticks);
-        if outcome.matched {
-            stats.matched += 1;
-            stats.oldest_match_age = stats.oldest_match_age.max(outcome.age);
+        match read_identity(pid) {
+            Ok(identity) => processes.push(ProcessSnapshot { pid, identity }),
+            Err(error) if transient_proc_error(&error) => {}
+            Err(error) => warn!(pid, %error, "cannot inspect process"),
         }
+    }
+
+    let active_jobs = find_active_jobs(config, &processes);
+    let state_path = job_state_path(config);
+    let previous_state = match load_job_state(&state_path, &boot_id) {
+        Ok(job_state) => job_state,
+        Err(error) => {
+            warn!(%error, "cannot load crawler job state; starting fresh");
+            stats.failures += 1;
+            BTreeMap::new()
+        }
+    };
+    let (stale_jobs, next_state) =
+        update_job_state(config, &active_jobs, &previous_state, uptime, clock_ticks);
+
+    if !config.dry_run
+        && let Err(error) = write_job_state(&state_path, &boot_id, &next_state)
+    {
+        warn!(%error, "cannot persist crawler job state");
+        stats.failures += 1;
+    }
+
+    for job in stale_jobs {
+        let outcome = inspect_job(config, &job, uptime, clock_ticks);
+        stats.matched += u64::from(outcome.matched);
         stats.killed += u64::from(outcome.killed);
         stats.failures += u64::from(outcome.failed);
+        stats.oldest_match_age = stats.oldest_match_age.max(outcome.age);
     }
 
     stats.scan_duration = started.elapsed();
@@ -239,30 +298,98 @@ struct ProcessOutcome {
     age: Duration,
 }
 
-fn inspect_process(
+fn find_active_jobs(config: &Config, processes: &[ProcessSnapshot]) -> Vec<ActiveJob> {
+    let mut groups = BTreeMap::<(i32, i32), (u64, Option<u64>)>::new();
+    for process in processes {
+        let group = (process.identity.process_group, process.identity.session);
+        groups
+            .entry(group)
+            .and_modify(|(oldest, leader)| {
+                *oldest = (*oldest).min(process.identity.start_ticks);
+                if process.pid == process.identity.process_group {
+                    *leader = Some(process.identity.start_ticks);
+                }
+            })
+            .or_insert((
+                process.identity.start_ticks,
+                (process.pid == process.identity.process_group)
+                    .then_some(process.identity.start_ticks),
+            ));
+    }
+
+    let mut jobs = BTreeMap::<JobKey, ActiveJob>::new();
+    for process in processes {
+        if !config.names.contains(&process.identity.comm) {
+            continue;
+        }
+        let group = (process.identity.process_group, process.identity.session);
+        let Some((oldest_start_ticks, leader_start_ticks)) = groups.get(&group).copied() else {
+            continue;
+        };
+        let key = JobKey {
+            process_group: process.identity.process_group,
+            session: process.identity.session,
+            leader_start_ticks: leader_start_ticks.unwrap_or(oldest_start_ticks),
+        };
+        jobs.entry(key)
+            .and_modify(|job| {
+                if process.identity.start_ticks < job.oldest_crawler_start_ticks {
+                    job.oldest_crawler_start_ticks = process.identity.start_ticks;
+                    job.representative = process.clone();
+                }
+            })
+            .or_insert_with(|| ActiveJob {
+                key,
+                oldest_crawler_start_ticks: process.identity.start_ticks,
+                representative: process.clone(),
+            });
+    }
+    jobs.into_values().collect()
+}
+
+fn update_job_state(
     config: &Config,
-    pid: i32,
+    active_jobs: &[ActiveJob],
+    previous_state: &BTreeMap<JobKey, u64>,
+    uptime: Duration,
+    clock_ticks: u64,
+) -> (Vec<CrawlJob>, BTreeMap<JobKey, u64>) {
+    let now_seconds = uptime.as_secs();
+    let mut stale_jobs = Vec::new();
+    let mut next_state = BTreeMap::new();
+
+    for active in active_jobs {
+        let crawler_started_seconds =
+            duration_from_ticks(active.oldest_crawler_start_ticks, clock_ticks).as_secs();
+        let first_seen_seconds = previous_state
+            .get(&active.key)
+            .copied()
+            .unwrap_or(crawler_started_seconds)
+            .min(crawler_started_seconds);
+        next_state.insert(active.key, first_seen_seconds);
+
+        if now_seconds.saturating_sub(first_seen_seconds) >= config.max_age.as_secs() {
+            stale_jobs.push(CrawlJob {
+                active: active.clone(),
+                first_seen_seconds,
+            });
+        }
+    }
+
+    (stale_jobs, next_state)
+}
+
+fn inspect_job(
+    config: &Config,
+    job: &CrawlJob,
     uptime: Duration,
     clock_ticks: u64,
 ) -> ProcessOutcome {
-    let identity = match read_identity(pid) {
-        Ok(identity) => identity,
-        Err(error) if transient_proc_error(&error) => return ProcessOutcome::default(),
-        Err(error) => {
-            warn!(pid, %error, "cannot inspect process");
-            return ProcessOutcome::default();
-        }
-    };
-    if !config.names.contains(&identity.comm) {
-        return ProcessOutcome::default();
-    }
-
-    let started_at = duration_from_ticks(identity.start_ticks, clock_ticks);
-    let age = uptime.saturating_sub(started_at);
-    if age < config.max_age {
-        return ProcessOutcome::default();
-    }
-
+    let pid = job.active.representative.pid;
+    let identity = &job.active.representative.identity;
+    let age = Duration::from_secs(uptime.as_secs().saturating_sub(job.first_seen_seconds));
+    let crawler_started_at = duration_from_ticks(identity.start_ticks, clock_ticks);
+    let crawler_age = uptime.saturating_sub(crawler_started_at);
     let mut outcome = ProcessOutcome {
         matched: true,
         age,
@@ -273,16 +400,19 @@ fn inspect_process(
         info!(
             pid,
             age_seconds = age.as_secs(),
-            comm = identity.comm,
+            crawler_age_seconds = crawler_age.as_secs(),
+            process_group = job.active.key.process_group,
+            session = job.active.key.session,
+            comm = identity.comm.as_str(),
             cmdline,
             action = "would_kill",
-            "stale crawler matched"
+            "stale crawler job matched"
         );
         return outcome;
     }
 
     match read_identity(pid) {
-        Ok(current) if current == identity => {}
+        Ok(current) if current == *identity => {}
         Ok(_) => {
             info!(pid, "process identity changed during scan; skipping");
             return outcome;
@@ -295,16 +425,19 @@ fn inspect_process(
         }
     }
 
-    match kill(Pid::from_raw(pid), Signal::SIGKILL) {
+    match killpg(Pid::from_raw(job.active.key.process_group), Signal::SIGKILL) {
         Ok(()) => {
             outcome.killed = true;
             info!(
                 pid,
                 age_seconds = age.as_secs(),
-                comm = identity.comm,
+                crawler_age_seconds = crawler_age.as_secs(),
+                process_group = job.active.key.process_group,
+                session = job.active.key.session,
+                comm = identity.comm.as_str(),
                 cmdline,
                 action = "killed",
-                "stale crawler killed"
+                "stale crawler job killed"
             );
         }
         Err(Errno::ESRCH) => {}
@@ -313,9 +446,12 @@ fn inspect_process(
             warn!(
                 pid,
                 age_seconds = age.as_secs(),
-                comm = identity.comm,
+                crawler_age_seconds = crawler_age.as_secs(),
+                process_group = job.active.key.process_group,
+                session = job.active.key.session,
+                comm = identity.comm.as_str(),
                 %error,
-                "failed to kill stale crawler"
+                "failed to kill stale crawler job"
             );
         }
     }
@@ -344,14 +480,22 @@ fn parse_proc_stat(stat: &str) -> Option<ProcIdentity> {
     }
 
     let comm = stat.get(open + 1..close)?.to_owned();
-    let start_ticks = stat
-        .get(close + 1..)?
-        .split_whitespace()
-        .nth(19)?
-        .parse::<u64>()
-        .ok()?;
+    let mut fields = stat.get(close + 1..)?.split_whitespace();
+    let _state = fields.next()?;
+    let _parent_pid = fields.next()?.parse::<i32>().ok()?;
+    let process_group = fields.next()?.parse::<i32>().ok()?;
+    let session = fields.next()?.parse::<i32>().ok()?;
+    let start_ticks = fields.nth(15)?.parse::<u64>().ok()?;
+    if process_group <= 0 || session <= 0 {
+        return None;
+    }
 
-    Some(ProcIdentity { comm, start_ticks })
+    Some(ProcIdentity {
+        comm,
+        process_group,
+        session,
+        start_ticks,
+    })
 }
 
 fn transient_proc_error(error: &io::Error) -> bool {
@@ -387,6 +531,139 @@ fn parse_decimal_duration(value: &str) -> Result<Duration> {
     }
 
     Ok(Duration::from_secs(seconds) + Duration::from_nanos(nanos))
+}
+
+fn job_state_path(config: &Config) -> PathBuf {
+    let default_names = DEFAULT_NAMES
+        .iter()
+        .map(|name| (*name).to_owned())
+        .collect::<BTreeSet<_>>();
+    if config.max_age == DEFAULT_MAX_AGE && config.names == default_names {
+        return PathBuf::from(JOB_STATE_PATH);
+    }
+
+    // Stable FNV-1a: policy state must survive binary upgrades, so avoid a
+    // std hasher whose algorithm is intentionally unspecified.
+    let mut hash = 0xcbf2_9ce4_8422_2325_u64;
+    for byte in config.max_age.as_secs().to_le_bytes() {
+        hash ^= u64::from(byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    for name in &config.names {
+        for &byte in name.as_bytes() {
+            hash ^= u64::from(byte);
+            hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+        hash ^= 0xff;
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    PathBuf::from(format!("{JOB_STATE_PATH}-{hash:016x}"))
+}
+
+fn read_boot_id() -> Result<String> {
+    let boot_id =
+        fs::read_to_string("/proc/sys/kernel/random/boot_id").context("failed to read boot ID")?;
+    let boot_id = boot_id.trim();
+    if boot_id.is_empty() {
+        bail!("boot ID is empty");
+    }
+    Ok(boot_id.to_owned())
+}
+
+fn load_job_state(path: &Path, boot_id: &str) -> io::Result<BTreeMap<JobKey, u64>> {
+    let raw = match fs::read_to_string(path) {
+        Ok(raw) => raw,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(BTreeMap::new()),
+        Err(error) => return Err(error),
+    };
+    parse_job_state(&raw, boot_id)
+}
+
+fn parse_job_state(raw: &str, boot_id: &str) -> io::Result<BTreeMap<JobKey, u64>> {
+    let mut lines = raw.lines();
+    let Some(header) = lines.next() else {
+        return Ok(BTreeMap::new());
+    };
+    let Some(saved_boot_id) = header.strip_prefix("v1\t") else {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "unsupported crawler state format",
+        ));
+    };
+    if saved_boot_id != boot_id {
+        return Ok(BTreeMap::new());
+    }
+
+    let mut state = BTreeMap::new();
+    for line in lines.filter(|line| !line.is_empty()) {
+        let mut fields = line.split('\t');
+        let process_group = parse_state_field(fields.next(), "process group")?;
+        let session = parse_state_field(fields.next(), "session")?;
+        let leader_start_ticks = parse_state_field(fields.next(), "leader start ticks")?;
+        let first_seen_seconds = parse_state_field(fields.next(), "first seen seconds")?;
+        if fields.next().is_some() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "too many crawler state fields",
+            ));
+        }
+        let process_group = i32::try_from(process_group).map_err(|_| {
+            io::Error::new(io::ErrorKind::InvalidData, "process group does not fit i32")
+        })?;
+        let session = i32::try_from(session)
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "session does not fit i32"))?;
+        if process_group <= 0 || session <= 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "non-positive crawler job identity",
+            ));
+        }
+        state.insert(
+            JobKey {
+                process_group,
+                session,
+                leader_start_ticks,
+            },
+            first_seen_seconds,
+        );
+    }
+    Ok(state)
+}
+
+fn parse_state_field(field: Option<&str>, name: &str) -> io::Result<u64> {
+    field
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, format!("missing {name}")))?
+        .parse::<u64>()
+        .map_err(|error| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("invalid {name}: {error}"),
+            )
+        })
+}
+
+fn serialize_job_state(boot_id: &str, state: &BTreeMap<JobKey, u64>) -> String {
+    let mut result = format!("v1\t{boot_id}\n");
+    for (key, first_seen_seconds) in state {
+        let _ = writeln!(
+            result,
+            "{}\t{}\t{}\t{}",
+            key.process_group, key.session, key.leader_start_ticks, first_seen_seconds,
+        );
+    }
+    result
+}
+
+fn write_job_state(path: &Path, boot_id: &str, state: &BTreeMap<JobKey, u64>) -> io::Result<()> {
+    let temporary = path.with_extension(format!("tmp-{}", process::id()));
+    fs::write(&temporary, serialize_job_state(boot_id, state))?;
+    match fs::rename(&temporary, path) {
+        Ok(()) => Ok(()),
+        Err(error) => {
+            let _ = fs::remove_file(&temporary);
+            Err(error)
+        }
+    }
 }
 
 fn clock_ticks_per_second() -> Result<u64> {
@@ -447,6 +724,8 @@ mod tests {
             parsed,
             ProcIdentity {
                 comm: "strange ) process".to_owned(),
+                process_group: 2,
+                session: 3,
                 start_ticks: 4242,
             }
         );
@@ -494,6 +773,147 @@ mod tests {
             })
         );
         Ok(())
+    }
+
+    fn process(
+        pid: i32,
+        comm: &str,
+        process_group: i32,
+        session: i32,
+        start_ticks: u64,
+    ) -> ProcessSnapshot {
+        ProcessSnapshot {
+            pid,
+            identity: ProcIdentity {
+                comm: comm.to_owned(),
+                process_group,
+                session,
+                start_ticks,
+            },
+        }
+    }
+
+    fn rg_config() -> Config {
+        Config {
+            max_age: Duration::from_secs(300),
+            names: BTreeSet::from(["rg".to_owned()]),
+            dry_run: false,
+        }
+    }
+
+    #[test]
+    fn fresh_crawler_in_old_job_starts_a_fresh_job_timer() {
+        let processes = vec![
+            process(100, "bash", 100, 100, 10_000),
+            process(101, "xargs", 100, 100, 11_000),
+            process(102, "rg", 100, 100, 49_000),
+        ];
+        let active = find_active_jobs(&rg_config(), &processes);
+        assert_eq!(active.len(), 1);
+
+        let (stale_jobs, next_state) = update_job_state(
+            &rg_config(),
+            &active,
+            &BTreeMap::new(),
+            Duration::from_secs(500),
+            100,
+        );
+        assert_eq!(stale_jobs, Vec::new());
+        assert_eq!(next_state.get(&active[0].key), Some(&490));
+    }
+
+    #[test]
+    fn respawned_crawler_keeps_continuous_job_timer() {
+        let processes = vec![
+            process(100, "bash", 100, 100, 10_000),
+            process(101, "xargs", 100, 100, 11_000),
+            process(202, "rg", 100, 100, 49_000),
+        ];
+        let active = find_active_jobs(&rg_config(), &processes);
+        let previous = BTreeMap::from([(active[0].key, 100)]);
+
+        let (stale_jobs, next_state) = update_job_state(
+            &rg_config(),
+            &active,
+            &previous,
+            Duration::from_secs(500),
+            100,
+        );
+        assert_eq!(stale_jobs.len(), 1);
+        assert_eq!(stale_jobs[0].active.representative.pid, 202);
+        assert_eq!(stale_jobs[0].first_seen_seconds, 100);
+        assert_eq!(next_state.get(&active[0].key), Some(&100));
+    }
+
+    #[test]
+    fn old_interactive_shell_does_not_age_separate_foreground_job() {
+        let processes = vec![
+            process(100, "bash", 100, 100, 10_000),
+            process(102, "rg", 102, 100, 49_000),
+        ];
+        let active = find_active_jobs(&rg_config(), &processes);
+        assert_eq!(active.len(), 1);
+        assert_eq!(active[0].key.process_group, 102);
+
+        let (stale_jobs, next_state) = update_job_state(
+            &rg_config(),
+            &active,
+            &BTreeMap::new(),
+            Duration::from_secs(500),
+            100,
+        );
+        assert_eq!(stale_jobs, Vec::new());
+        assert_eq!(next_state.get(&active[0].key), Some(&490));
+    }
+
+    #[test]
+    fn multiple_crawlers_in_one_job_are_deduplicated() {
+        let processes = vec![
+            process(100, "bash", 100, 100, 10_000),
+            process(101, "rg", 100, 100, 20_000),
+            process(102, "rg", 100, 100, 30_000),
+        ];
+        let active = find_active_jobs(&rg_config(), &processes);
+        assert_eq!(active.len(), 1);
+        assert_eq!(active[0].oldest_crawler_start_ticks, 20_000);
+        assert_eq!(active[0].representative.pid, 101);
+    }
+
+    #[test]
+    fn state_round_trip_and_boot_change() -> Result<()> {
+        let key = JobKey {
+            process_group: 10,
+            session: 20,
+            leader_start_ticks: 30,
+        };
+        let state = BTreeMap::from([(key, 40)]);
+        let encoded = serialize_job_state("boot-a", &state);
+        assert_eq!(parse_job_state(&encoded, "boot-a")?, state);
+        assert_eq!(parse_job_state(&encoded, "boot-b")?, BTreeMap::new());
+        Ok(())
+    }
+
+    #[test]
+    fn custom_policy_uses_separate_state_file() {
+        let default = Config {
+            max_age: DEFAULT_MAX_AGE,
+            names: DEFAULT_NAMES
+                .iter()
+                .map(|name| (*name).to_owned())
+                .collect(),
+            dry_run: false,
+        };
+        assert_eq!(job_state_path(&default), PathBuf::from(JOB_STATE_PATH));
+
+        let mut custom = default.clone();
+        custom.max_age = Duration::from_secs(1);
+        let custom_path = job_state_path(&custom);
+        assert_ne!(custom_path, PathBuf::from(JOB_STATE_PATH));
+        assert!(custom_path.to_string_lossy().starts_with(JOB_STATE_PATH));
+
+        custom.max_age = DEFAULT_MAX_AGE;
+        custom.names = BTreeSet::from(["rg".to_owned()]);
+        assert_ne!(job_state_path(&custom), PathBuf::from(JOB_STATE_PATH));
     }
 
     #[test]
