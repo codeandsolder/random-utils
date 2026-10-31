@@ -26,7 +26,7 @@ jobs:
 
   release:
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    needs: [strict-rust, rust-1-99-shared-sccache]
+    needs: [rust-1-99-shared-sccache]
     runs-on: ubuntu-24.04
     permissions:
       contents: write
