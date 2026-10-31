@@ -310,11 +310,13 @@ fn find_active_jobs(config: &Config, processes: &[ProcessSnapshot]) -> Vec<Activ
                     *leader = Some(process.identity.start_ticks);
                 }
             })
-            .or_insert((
-                process.identity.start_ticks,
-                (process.pid == process.identity.process_group)
-                    .then_some(process.identity.start_ticks),
-            ));
+            .or_insert_with(|| {
+                (
+                    process.identity.start_ticks,
+                    (process.pid == process.identity.process_group)
+                        .then_some(process.identity.start_ticks),
+                )
+            });
     }
 
     let mut jobs = BTreeMap::<JobKey, ActiveJob>::new();
@@ -645,10 +647,12 @@ fn parse_state_field(field: Option<&str>, name: &str) -> io::Result<u64> {
 fn serialize_job_state(boot_id: &str, state: &BTreeMap<JobKey, u64>) -> String {
     let mut result = format!("v1\t{boot_id}\n");
     for (key, first_seen_seconds) in state {
+        let process_group = key.process_group;
+        let session = key.session;
+        let leader_start_ticks = key.leader_start_ticks;
         let _ = writeln!(
             result,
-            "{}\t{}\t{}\t{}",
-            key.process_group, key.session, key.leader_start_ticks, first_seen_seconds,
+            "{process_group}\t{session}\t{leader_start_ticks}\t{first_seen_seconds}",
         );
     }
     result
@@ -905,7 +909,7 @@ mod tests {
         };
         assert_eq!(job_state_path(&default), PathBuf::from(JOB_STATE_PATH));
 
-        let mut custom = default.clone();
+        let mut custom = default;
         custom.max_age = Duration::from_secs(1);
         let custom_path = job_state_path(&custom);
         assert_ne!(custom_path, PathBuf::from(JOB_STATE_PATH));
