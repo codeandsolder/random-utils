@@ -13,7 +13,7 @@ jobs:
     if: github.event_name != 'pull_request'
     permissions:
       contents: read
-    uses: codeandsolder/ci-workflows/.github/workflows/rust-sccache.yml@767cf3d17aeb6bf3c70299112b24ffddba5de871 # main
+    uses: codeandsolder/ci-workflows/.github/workflows/rust-sccache.yml@9be344b41c4c7e53f451d7ab1f66d7d9e7a9a6f4 # main
     with:
       rust-toolchain: "1.99.1"
       rust-components: "clippy rustfmt"
