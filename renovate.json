@@ -2,15 +2,34 @@
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
   "extends": [
     "config:recommended",
-    "helpers:pinGitHubActionDigests"
+    "helpers:pinGitHubActionDigests",
+    "github>codeandsolder/ci-workflows:renovate-ci-trust-root"
   ],
   "dependencyDashboard": true,
   "packageRules": [
     {
       "description": "Keep GitHub Actions and reusable workflows current as reviewed immutable pins",
-      "matchManagers": ["github-actions"],
+      "matchManagers": [
+        "github-actions"
+      ],
       "groupName": "GitHub Actions tooling",
       "automerge": false
+    },
+    {
+      "description": "Trust root digests require immediate review and never automerge",
+      "matchManagers": [
+        "github-actions"
+      ],
+      "matchPackageNames": [
+        "/^codeandsolder\\/(?:ci-workflows|rust-skills2)(?:\\/|$)/"
+      ],
+      "minimumReleaseAge": null,
+      "groupName": "Shared CI trust roots",
+      "groupSlug": "shared-ci-trust-roots",
+      "automerge": false
     }
-  ]
+  ],
+  "minimumReleaseAge": "3 days",
+  "minimumReleaseAgeBehaviour": "timestamp-required",
+  "internalChecksFilter": "strict"
 }
