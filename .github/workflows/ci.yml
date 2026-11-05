@@ -17,7 +17,7 @@ jobs:
   rust-1-99-shared-sccache:
     permissions:
       contents: read
-    uses: codeandsolder/ci-workflows/.github/workflows/rust-sccache.yml@eb617b2eb5829b781ffd39ad426cae2e6d8ec842 # main
+    uses: codeandsolder/ci-workflows/.github/workflows/rust-sccache.yml@0188eacbbff0836d0b5eca53b6cad4355adecd9e # main
     with:
       rust-toolchain: "1.99.1"
       rust-components: "clippy rustfmt"
@@ -40,14 +40,14 @@ jobs:
         with:
           toolchain: "1.99.1"
       - name: Setup mandatory release compiler cache
-        uses: codeandsolder/ci-workflows/.github/actions/setup-sccache@eb617b2eb5829b781ffd39ad426cae2e6d8ec842 # main
+        uses: codeandsolder/ci-workflows/.github/actions/setup-sccache@0188eacbbff0836d0b5eca53b6cad4355adecd9e # main
         with:
           rust-toolchain: "1.99.1"
       - name: Build release artifacts
         run: cargo +1.99.1 build --locked --release --workspace
       - name: Finalize mandatory release compiler cache
         if: always()
-        uses: codeandsolder/ci-workflows/.github/actions/finalize-sccache@eb617b2eb5829b781ffd39ad426cae2e6d8ec842 # main
+        uses: codeandsolder/ci-workflows/.github/actions/finalize-sccache@0188eacbbff0836d0b5eca53b6cad4355adecd9e # main
       - name: Assemble write-once release
         run: |
           set -euo pipefail
