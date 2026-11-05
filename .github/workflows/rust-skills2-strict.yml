@@ -6,12 +6,12 @@ on:
     branches: [main]
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: true
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
   contents: read
 
 jobs:
   strict-rust:
-    uses: codeandsolder/rust-skills2/.github/workflows/strict-rust.yml@6c05b0c1efa0a7a5d2cc665444ef13ece889429c # main
+    uses: codeandsolder/rust-skills2/.github/workflows/strict-rust.yml@2e3e7dfc5742132bbae83ae7527a8549cd87d4f3 # main
