@@ -5,15 +5,18 @@ on:
   pull_request:
   workflow_dispatch:
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 permissions:
   contents: read
 
 jobs:
   rust-1-99-shared-sccache:
-    if: github.event_name != 'pull_request'
     permissions:
       contents: read
-    uses: codeandsolder/ci-workflows/.github/workflows/rust-sccache.yml@9be344b41c4c7e53f451d7ab1f66d7d9e7a9a6f4 # main
+    uses: codeandsolder/ci-workflows/.github/workflows/rust-sccache.yml@eb617b2eb5829b781ffd39ad426cae2e6d8ec842 # main
     with:
       rust-toolchain: "1.99.1"
       rust-components: "clippy rustfmt"
@@ -35,8 +38,15 @@ jobs:
       - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
         with:
           toolchain: "1.99.1"
+      - name: Setup mandatory release compiler cache
+        uses: codeandsolder/ci-workflows/.github/actions/setup-sccache@eb617b2eb5829b781ffd39ad426cae2e6d8ec842 # main
+        with:
+          rust-toolchain: "1.99.1"
       - name: Build release artifacts
         run: cargo +1.99.1 build --locked --release --workspace
+      - name: Finalize mandatory release compiler cache
+        if: always()
+        uses: codeandsolder/ci-workflows/.github/actions/finalize-sccache@eb617b2eb5829b781ffd39ad426cae2e6d8ec842 # main
       - name: Assemble write-once release
         run: |
           set -euo pipefail
