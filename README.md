@@ -107,3 +107,16 @@ Install the release binary as `/usr/local/bin/laptop-policy`, copy the example c
 `systemd-logind` must not independently suspend on lid close, otherwise it can race the daemon before the daemon decides whether an external display is attached. The supplied [`packaging/80-laptop-policy-logind.conf`](packaging/80-laptop-policy-logind.conf) makes the daemon the owner of lid-close policy.
 
 The supplied [`packaging/80-laptop-policy-sleep.conf`](packaging/80-laptop-policy-sleep.conf) explicitly enables hibernation. If a host previously masked `sleep.target` or `hibernate.target`, those two targets must be unmasked; `suspend.target`, `hybrid-sleep.target`, and `suspend-then-hibernate.target` may remain masked.
+
+
+### Failed delegated-update retry pacing
+
+The generic manager persists both the last successful check and the time
+of the last *attempt*, before invoking any update command. A failed or
+interrupted delegated updater therefore cannot be retried more often than
+its configured min_interval_seconds just because the manager's timer runs
+more frequently. The failure still returns an error and never advances
+last_checked_unix, overwrites the installed release tag, or skips the
+underlying updater's own health checks and rollback. Dry-run has no state
+mutation, and --force explicitly bypasses the interval gate. The same
+scheduling protection applies to native GitHub release checks.
