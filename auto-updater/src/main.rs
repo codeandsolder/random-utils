@@ -37,6 +37,10 @@ struct PackageState {
     artifacts: BTreeMap<String, String>,
     #[serde(default)]
     last_checked_unix: u64,
+    /// Persisted before execution, even if the delegated command fails or
+    /// crashes. Failure never advances `last_checked_unix`.
+    #[serde(default)]
+    last_attempted_unix: u64,
 }
 
 #[derive(Debug)]
@@ -202,7 +206,7 @@ fn update_package(package: &Package, runtime: &Runtime<'_>) -> Result<()> {
     let mut state = load_state(&state_path)?;
     let now = unix_now()?;
     if !is_check_due(
-        state.last_checked_unix,
+        state.last_checked_unix.max(state.last_attempted_unix),
         now,
         package.min_interval_seconds,
         runtime.cli.force,
@@ -211,6 +215,13 @@ fn update_package(package: &Package, runtime: &Runtime<'_>) -> Result<()> {
         return Ok(());
     }
 
+    // Record the attempt *before* dispatch: a failed or interrupted delegated
+    // rollout must not cause the 5-minute manager timer to repeatedly restart
+    // the same service. Successful checks still have their separate timestamp.
+    if !runtime.cli.dry_run {
+        state.last_attempted_unix = now;
+        save_state(&state_path, &state)?;
+    }
     match &package.source {
         Source::GithubRelease { repo } => {
             update_github_package(package, repo, &state_path, &mut state, now, runtime)
@@ -979,6 +990,69 @@ mod tests {
         assert!(is_check_due(40, 100, 60, false));
         assert!(is_check_due(110, 100, 60, false));
         assert!(is_check_due(99, 100, 60, true));
+    }
+
+    #[test]
+    fn failed_delegated_update_respects_retry_interval() -> anyhow::Result<()> {
+        use super::{Cli, Runtime, load_state, state_path, update_package};
+        use crate::config::Config;
+        use std::{collections::BTreeSet, fs};
+
+        let dir = tempfile::tempdir()?;
+        let config_path = dir.path().join("config.toml");
+        fs::write(
+            &config_path,
+            format!(
+                r#"state_dir = {}
+max_download_bytes = 1024
+
+[[package]]
+name = "failed-command"
+min_interval_seconds = 900
+[package.source]
+type = "command"
+program = "/usr/bin/false"
+"#,
+                serde_json::to_string(&dir.path().to_string_lossy())?
+            ),
+        )?;
+        let config = Config::load(&config_path)?;
+        let cli = Cli {
+            config: config_path,
+            packages: BTreeSet::new(),
+            dry_run: false,
+            force: false,
+            list: false,
+        };
+        let agent: ureq::Agent = ureq::Agent::config_builder().build().into();
+        let runtime = Runtime {
+            state_dir: &config.state_dir,
+            max_download_bytes: config.max_download_bytes,
+            download_agent: &agent,
+            health_agent: &agent,
+            cli: &cli,
+        };
+        let package = &config.package[0];
+        assert!(update_package(package, &runtime).is_err());
+        let saved = load_state(&state_path(runtime.state_dir, &package.name))?;
+        assert_eq!(saved.last_checked_unix, 0);
+        assert!(saved.last_attempted_unix > 0);
+        // The failed command is no longer invoked on every manager tick.
+        assert!(update_package(package, &runtime).is_ok());
+        // The test also checks that the persisted attempt's interval is real.
+        assert!(!super::is_check_due(
+            saved.last_checked_unix.max(saved.last_attempted_unix),
+            saved.last_attempted_unix + 899,
+            package.min_interval_seconds,
+            false,
+        ));
+        assert!(super::is_check_due(
+            saved.last_checked_unix.max(saved.last_attempted_unix),
+            saved.last_attempted_unix + 900,
+            package.min_interval_seconds,
+            false,
+        ));
+        Ok(())
     }
 
     #[test]
