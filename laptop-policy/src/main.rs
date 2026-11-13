@@ -65,8 +65,8 @@ impl Config {
         if self.charge_limit_percent > 100 || self.full_charge_percent > 100 {
             bail!("charge limits must be at most 100");
         }
-        if self.charge_limit_percent >= self.full_charge_percent {
-            bail!("charge_limit_percent must be below full_charge_percent");
+        if self.charge_limit_percent > self.full_charge_percent {
+            bail!("charge_limit_percent must not exceed full_charge_percent");
         }
         if !matches!(self.sync_restore_value.as_str(), "standard" | "always") {
             bail!("sync_restore_value must be standard or always");
@@ -836,6 +836,17 @@ mod tests {
         Config, MetricContext, PersistentState, PowerSource, Snapshot, elapsed_at_least,
         is_internal_connector, render_metrics,
     };
+
+    #[test]
+    fn equal_full_and_limited_charge_thresholds_are_valid() {
+        let mut config = Config {
+            charge_limit_percent: 100,
+            ..Config::default()
+        };
+        assert!(config.validate().is_ok());
+        config.full_charge_percent = 99;
+        assert!(config.validate().is_err());
+    }
 
     #[test]
     fn charge_limit_requires_full_plugged_window() {
