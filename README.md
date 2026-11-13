@@ -77,8 +77,8 @@ systemctl enable --now crawl-killer.timer
 
 - sets ZFS `sync=disabled` while aggregate battery capacity is above a configurable threshold (40% by default), and restores `sync=standard` at or below it;
 - hibernates after a short grace period when wall power is absent, the lid is closed, and no external DRM display is connected;
-- after 48 continuous hours on external power, limits charging to 80% on hardware exposing a supported charge-limit interface;
-- after one continuous hour off external power, restores the charge limit to 100%.
+- after 24 continuous hours on external power, limits charging to 80% on hardware exposing a supported charge-limit interface;
+- after 15 continuous minutes off external power, restores the charge limit to 100%.
 
 The plug/unplug timers are persisted across daemon restarts and hibernation. Charge-limit support is runtime-probed: the generic Linux `charge_control_end_threshold` ABI is preferred, with the Acer `acer-wmi-battery` health-mode ABI supported when present. Unsupported hardware is logged and left alone.
 
