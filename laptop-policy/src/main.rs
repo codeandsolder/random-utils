@@ -42,8 +42,8 @@ impl Default for Config {
             poll_interval_seconds: 10,
             sync_disable_above_percent: 40,
             sync_restore_value: "standard".to_owned(),
-            plugged_limit_after_hours: 48,
-            unplugged_reset_after_minutes: 60,
+            plugged_limit_after_hours: 24,
+            unplugged_reset_after_minutes: 15,
             charge_limit_percent: 80,
             full_charge_percent: 100,
             hibernate_grace_seconds: 10,
@@ -842,20 +842,20 @@ mod tests {
         let config = Config::default();
         let mut state = PersistentState::default();
         state.observe_power(PowerSource::External, 1_000);
-        assert!(!state.desired_charge_limited(&config, 1_000 + 47 * 3600));
-        assert!(state.desired_charge_limited(&config, 1_000 + 48 * 3600));
+        assert!(!state.desired_charge_limited(&config, 1_000 + 24 * 3600 - 1));
+        assert!(state.desired_charge_limited(&config, 1_000 + 24 * 3600));
     }
 
     #[test]
-    fn one_hour_unplugged_clears_existing_limit() {
+    fn fifteen_minutes_unplugged_clears_existing_limit() {
         let config = Config::default();
         let mut state = PersistentState {
             charge_limited: true,
             ..PersistentState::default()
         };
         state.observe_power(PowerSource::Battery, 50_000);
-        assert!(state.desired_charge_limited(&config, 50_000 + 3599));
-        assert!(!state.desired_charge_limited(&config, 50_000 + 3600));
+        assert!(state.desired_charge_limited(&config, 50_000 + 15 * 60 - 1));
+        assert!(!state.desired_charge_limited(&config, 50_000 + 15 * 60));
     }
 
     #[test]
@@ -865,7 +865,7 @@ mod tests {
         state.observe_power(PowerSource::External, 0);
         state.observe_power(PowerSource::Battery, 10_000);
         state.observe_power(PowerSource::External, 10_100);
-        assert!(!state.desired_charge_limited(&config, 10_100 + 47 * 3600));
+        assert!(!state.desired_charge_limited(&config, 10_100 + 24 * 3600 - 1));
     }
 
     #[test]
@@ -876,9 +876,23 @@ mod tests {
             ..PersistentState::default()
         };
         state.observe_power(PowerSource::Battery, 20_000);
-        assert!(state.desired_charge_limited(&config, 20_000 + 3599));
-        state.observe_power(PowerSource::External, 23_500);
-        assert!(state.desired_charge_limited(&config, 23_500));
+        assert!(state.desired_charge_limited(&config, 20_000 + 15 * 60 - 1));
+        state.observe_power(PowerSource::External, 20_800);
+        assert!(state.desired_charge_limited(&config, 20_800));
+    }
+
+    #[test]
+    fn replugging_restarts_unplugged_reset_window() {
+        let config = Config::default();
+        let mut state = PersistentState {
+            charge_limited: true,
+            ..PersistentState::default()
+        };
+        state.observe_power(PowerSource::Battery, 10_000);
+        state.observe_power(PowerSource::External, 10_800);
+        state.observe_power(PowerSource::Battery, 11_000);
+        assert!(state.desired_charge_limited(&config, 11_899));
+        assert!(!state.desired_charge_limited(&config, 11_900));
     }
 
     #[test]
