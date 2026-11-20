@@ -8,7 +8,7 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
-lurkmoar = { git = "https://github.com/codeandsolder/lurkmoar-rs", rev = "a6980f4f792e7af99c8e802772d3f555e88014ef" }
+lurkmoar = { git = "https://github.com/codeandsolder/lurkmoar-rs", rev = "54ce7913f124adfd3ee605139552f5eceee2bbe2" }
 tracing = "0.1.41"
 tracing-journald = "0.3.2"
 tracing-subscriber = { version = "0.3.20", default-features = false, features = ["fmt", "registry", "smallvec"] }
