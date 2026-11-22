@@ -38,7 +38,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable
         with:
-          toolchain: "1.99.1"
+          toolchain: "1.100.0"
       - name: Setup mandatory release compiler cache
         uses: codeandsolder/ci-workflows/.github/actions/setup-sccache@097cc824fc551bce6708700117f796c746689faa # main
         with:
