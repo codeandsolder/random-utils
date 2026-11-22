@@ -62,7 +62,7 @@ impl Metrics {
     ///
     /// If no metrics endpoint is configured, returns a disabled sink so callers can
     /// keep instrumentation unconditional.
-    #[must_use]
+    #[must_use = "the returned metrics recorder owns the configured client and spool state"]
     pub fn from_env(job: &str, metric_prefix: &str, spool_dir: &Path) -> Self {
         let Ok(endpoint) = env::var("RANDOM_UTILS_METRICS_URL") else {
             tracing::debug!(job, "metrics disabled: RANDOM_UTILS_METRICS_URL is not set");
@@ -103,7 +103,7 @@ impl Metrics {
         }
     }
 
-    #[must_use]
+    #[must_use = "the returned recorder represents disabled metrics collection"]
     fn disabled(metric_prefix: &str) -> Self {
         Self {
             client: None,
