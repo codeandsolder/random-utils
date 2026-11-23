@@ -3,6 +3,7 @@ name: CI
 on:
   push:
     branches: [main]
+    tags: ["v*"]
   pull_request:
   workflow_dispatch:
 
@@ -28,7 +29,7 @@ jobs:
         cargo test --locked --workspace
 
   release:
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
     needs: [rust-shared-sccache]
     runs-on: ubuntu-26.04
     permissions:
@@ -72,13 +73,13 @@ jobs:
               sha256sum "$asset" >"$asset.sha256"
             done
           )
-      - name: Publish release for this main commit
+      - name: Publish versioned release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          tag="auto-${GITHUB_SHA}"
-          title="random-utils ${GITHUB_SHA::12}"
+          tag="${GITHUB_REF_NAME}"
+          title="random-utils ${tag}"
           if gh release view "$tag" >/dev/null 2>&1; then
             existing="$(mktemp -d)"
             trap 'rm -rf "$existing"' EXIT
@@ -91,5 +92,5 @@ jobs:
             done
             echo "release $tag already exists with identical assets; leaving it untouched"
           else
-            gh release create "$tag" dist/* --title "$title" --notes "Automated write-once release for ${GITHUB_SHA}." --latest
+            gh release create "$tag" dist/* --title "$title" --notes "Write-once release for ${GITHUB_SHA}." --latest
           fi
