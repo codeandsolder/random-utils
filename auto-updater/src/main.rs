@@ -12,11 +12,12 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use anyhow::{Context, Result, anyhow, bail};
 use config::{Artifact, CommandSpec, Config, HealthCheck, Package, Source};
 use fs2::FileExt;
+use futures_util::StreamExt as _;
 use percent_encoding::{NON_ALPHANUMERIC, percent_decode_str, utf8_percent_encode};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tempfile::Builder;
-use ureq::{Agent, ResponseExt};
+use wreq::Client;
 
 const DEFAULT_CONFIG: &str = "/etc/random-utils/update.toml";
 
@@ -62,8 +63,8 @@ struct Backup {
 struct Runtime<'a> {
     state_dir: &'a Path,
     max_download_bytes: u64,
-    download_agent: &'a Agent,
-    health_agent: &'a Agent,
+    download_agent: &'a Client,
+    health_agent: &'a Client,
     cli: &'a Cli,
 }
 
@@ -72,7 +73,7 @@ struct TransactionContext<'a> {
     tag: &'a str,
     state_path: &'a Path,
     now: u64,
-    health_agent: &'a Agent,
+    health_agent: &'a Client,
     env: &'a [(String, String)],
 }
 
@@ -82,7 +83,8 @@ enum CommandOutcome {
     Deferred,
 }
 
-fn main() -> Result<()> {
+#[tokio::main(flavor = "current_thread")]
+async fn main() -> Result<()> {
     let cli = parse_cli()?;
     let config = Config::load(&cli.config)?;
 
@@ -97,18 +99,17 @@ fn main() -> Result<()> {
         .with_context(|| format!("create state directory {}", config.state_dir.display()))?;
     let lock = acquire_lock(&config.state_dir)?;
 
-    let download_agent: Agent = Agent::config_builder()
+    let download_agent = Client::builder()
         .https_only(true)
-        .timeout_global(Some(Duration::from_secs(600)))
+        .timeout(Duration::from_secs(600))
+        .redirect(wreq::redirect::Policy::limited(10))
         .user_agent("random-utils-update/0.1")
-        .build()
-        .into();
-    let health_agent: Agent = Agent::config_builder()
-        .timeout_global(Some(Duration::from_secs(10)))
-        .http_status_as_error(false)
+        .build()?;
+    let health_agent = Client::builder()
+        .timeout(Duration::from_secs(10))
+        .redirect(wreq::redirect::Policy::limited(10))
         .user_agent("random-utils-update-health/0.1")
-        .build()
-        .into();
+        .build()?;
 
     let runtime = Runtime {
         state_dir: &config.state_dir,
@@ -125,7 +126,7 @@ fn main() -> Result<()> {
             continue;
         }
         seen.insert(package.name.clone());
-        match update_package(package, &runtime) {
+        match update_package(package, &runtime).await {
             Ok(()) => {}
             Err(error) => {
                 failures = failures.saturating_add(1);
@@ -201,7 +202,7 @@ fn acquire_lock(state_dir: &Path) -> Result<File> {
     }
 }
 
-fn update_package(package: &Package, runtime: &Runtime<'_>) -> Result<()> {
+async fn update_package(package: &Package, runtime: &Runtime<'_>) -> Result<()> {
     let state_path = state_path(runtime.state_dir, &package.name);
     let mut state = load_state(&state_path)?;
     let now = unix_now()?;
@@ -224,7 +225,7 @@ fn update_package(package: &Package, runtime: &Runtime<'_>) -> Result<()> {
     }
     match &package.source {
         Source::GithubRelease { repo } => {
-            update_github_package(package, repo, &state_path, &mut state, now, runtime)
+            update_github_package(package, repo, &state_path, &mut state, now, runtime).await
         }
         Source::Command(spec) => {
             update_command_package(package, spec, &state_path, state, now, runtime.cli)
@@ -265,7 +266,7 @@ fn update_command_package(
     Ok(())
 }
 
-fn update_github_package(
+async fn update_github_package(
     package: &Package,
     repo: &str,
     state_path: &Path,
@@ -274,6 +275,7 @@ fn update_github_package(
     runtime: &Runtime<'_>,
 ) -> Result<()> {
     let tag = latest_github_tag(runtime.download_agent, repo)
+        .await
         .with_context(|| format!("{}: resolve latest GitHub release", package.name))?;
 
     if state.tag.as_deref() == Some(&tag) && installed_matches_state(package, state)? {
@@ -296,7 +298,8 @@ fn update_github_package(
         work.path(),
         runtime.max_download_bytes,
         runtime.download_agent,
-    )?;
+    )
+    .await?;
 
     if installed_matches_candidates(&candidates)? {
         state.tag = Some(tag.clone());
@@ -339,7 +342,7 @@ fn update_github_package(
         health_agent: runtime.health_agent,
         env: &env,
     };
-    let result = apply_transaction(&transaction, &candidates, state);
+    let result = apply_transaction(&transaction, &candidates, state).await;
     if let Err(error) = result {
         let rollback_result = rollback_transaction(package, &backups, &env);
         return match rollback_result {
@@ -354,7 +357,7 @@ fn update_github_package(
     Ok(())
 }
 
-fn apply_transaction(
+async fn apply_transaction(
     transaction: &TransactionContext<'_>,
     candidates: &[CandidateArtifact<'_>],
     state: &mut PackageState,
@@ -372,7 +375,7 @@ fn apply_transaction(
         }
     }
     for health in &transaction.package.health {
-        run_health_check(health, transaction.health_agent, transaction.env)?;
+        run_health_check(health, transaction.health_agent, transaction.env).await?;
     }
     state.tag = Some(transaction.tag.to_owned());
     state.artifacts = candidate_state(candidates);
@@ -413,13 +416,15 @@ fn rollback_transaction(
     }
 }
 
-fn latest_github_tag(agent: &Agent, repo: &str) -> Result<String> {
+async fn latest_github_tag(agent: &Client, repo: &str) -> Result<String> {
     let url = format!("https://github.com/{repo}/releases/latest");
     let response = agent
-        .get(&url)
-        .call()
+        .get(url.as_str())
+        .send()
+        .await?
+        .error_for_status()
         .with_context(|| format!("GET {url}"))?;
-    let path = response.get_uri().path();
+    let path = response.uri().path();
     let marker = "/releases/tag/";
     let encoded = path
         .find(marker)
@@ -442,13 +447,13 @@ fn release_asset_url(repo: &str, tag: &str, asset: &str) -> String {
     format!("https://github.com/{repo}/releases/download/{tag}/{asset}")
 }
 
-fn download_candidates<'a>(
+async fn download_candidates<'a>(
     package: &'a Package,
     repo: &str,
     tag: &str,
     work_dir: &Path,
     max_download_bytes: u64,
-    agent: &Agent,
+    agent: &Client,
 ) -> Result<Vec<CandidateArtifact<'a>>> {
     let mut checksum_cache = HashMap::<String, String>::new();
     let mut result = Vec::with_capacity(package.artifact.len());
@@ -461,7 +466,8 @@ fn download_candidates<'a>(
                 agent,
                 &release_asset_url(repo, tag, &checksum_asset),
                 4 * 1024 * 1024,
-            )?;
+            )
+            .await?;
             checksum_cache.insert(checksum_asset.clone(), text);
         }
         let checksum_text = checksum_cache
@@ -474,7 +480,8 @@ fn download_candidates<'a>(
             &release_asset_url(repo, tag, &asset),
             &path,
             max_download_bytes,
-        )?;
+        )
+        .await?;
         let digest = sha256_file(&path)?;
         if digest != expected {
             bail!(
@@ -491,40 +498,48 @@ fn download_candidates<'a>(
     Ok(result)
 }
 
-fn download_text(agent: &Agent, url: &str, limit: u64) -> Result<String> {
-    let mut response = agent
+async fn download_text(agent: &Client, url: &str, limit: u64) -> Result<String> {
+    let response = agent
         .get(url)
-        .call()
+        .send()
+        .await?
+        .error_for_status()
         .with_context(|| format!("GET {url}"))?;
-    response
-        .body_mut()
-        .with_config()
-        .limit(limit)
-        .read_to_string()
-        .with_context(|| format!("read {url}"))
+    let mut bytes = Vec::new();
+    let mut stream = std::pin::pin!(response.bytes_stream());
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.with_context(|| format!("read {url}"))?;
+        if u64::try_from(bytes.len().saturating_add(chunk.len()))? > limit {
+            bail!("download {url} exceeded configured limit of {limit} bytes");
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    String::from_utf8(bytes).with_context(|| format!("read {url}"))
 }
 
-fn download_file(agent: &Agent, url: &str, path: &Path, limit: u64) -> Result<()> {
-    let mut response = agent
+async fn download_file(agent: &Client, url: &str, path: &Path, limit: u64) -> Result<()> {
+    let response = agent
         .get(url)
-        .call()
+        .send()
+        .await?
+        .error_for_status()
         .with_context(|| format!("GET {url}"))?;
     if response
-        .body()
         .content_length()
         .is_some_and(|length| length > limit)
     {
         bail!("download {url} exceeds configured limit of {limit} bytes");
     }
-    let mut input = response
-        .body_mut()
-        .as_reader()
-        .take(limit.saturating_add(1));
     let mut output = File::create(path).with_context(|| format!("create {}", path.display()))?;
-    let written = std::io::copy(&mut input, &mut output)
-        .with_context(|| format!("download {url} to {}", path.display()))?;
-    if written > limit {
-        bail!("download {url} exceeded configured limit of {limit} bytes");
+    let mut stream = std::pin::pin!(response.bytes_stream());
+    let mut written = 0_u64;
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.with_context(|| format!("download {url} to {}", path.display()))?;
+        written = written.saturating_add(u64::try_from(chunk.len())?);
+        if written > limit {
+            bail!("download {url} exceeded configured limit of {limit} bytes");
+        }
+        output.write_all(&chunk)?;
     }
     output
         .sync_all()
@@ -787,7 +802,11 @@ fn restart_units(units: &[String]) -> Result<()> {
     Ok(())
 }
 
-fn run_health_check(check: &HealthCheck, agent: &Agent, env: &[(String, String)]) -> Result<()> {
+async fn run_health_check(
+    check: &HealthCheck,
+    agent: &Client,
+    env: &[(String, String)],
+) -> Result<()> {
     match check {
         HealthCheck::Http {
             url,
@@ -799,11 +818,9 @@ fn run_health_check(check: &HealthCheck, agent: &Agent, env: &[(String, String)]
             for attempt in 0..*attempts {
                 let response = agent
                     .get(url)
-                    .config()
-                    .timeout_global(Some(Duration::from_secs(*timeout_seconds)))
-                    .http_status_as_error(false)
-                    .build()
-                    .call();
+                    .timeout(Duration::from_secs(*timeout_seconds))
+                    .send()
+                    .await;
                 if let Ok(response) = response {
                     let status = response.status().as_u16();
                     if statuses.is_empty() || statuses.contains(&status) {
@@ -811,7 +828,7 @@ fn run_health_check(check: &HealthCheck, agent: &Agent, env: &[(String, String)]
                     }
                 }
                 if attempt + 1 < *attempts {
-                    thread::sleep(Duration::from_millis(*interval_ms));
+                    tokio::time::sleep(Duration::from_millis(*interval_ms)).await;
                 }
             }
             bail!("HTTP health check {url} did not reach an accepted status");
@@ -830,7 +847,7 @@ fn run_health_check(check: &HealthCheck, agent: &Agent, env: &[(String, String)]
                     return Ok(());
                 }
                 if attempt + 1 < *attempts {
-                    thread::sleep(Duration::from_millis(*interval_ms));
+                    tokio::time::sleep(Duration::from_millis(*interval_ms)).await;
                 }
             }
             bail!("systemd unit {unit} did not become active");
@@ -992,8 +1009,8 @@ mod tests {
         assert!(is_check_due(99, 100, 60, true));
     }
 
-    #[test]
-    fn failed_delegated_update_respects_retry_interval() -> anyhow::Result<()> {
+    #[tokio::test]
+    async fn failed_delegated_update_respects_retry_interval() -> anyhow::Result<()> {
         use super::{Cli, Runtime, load_state, state_path, update_package};
         use crate::config::Config;
         use std::{collections::BTreeSet, fs};
@@ -1024,7 +1041,7 @@ program = "/usr/bin/false"
             force: false,
             list: false,
         };
-        let agent: ureq::Agent = ureq::Agent::config_builder().build().into();
+        let agent = wreq::Client::builder().build()?;
         let runtime = Runtime {
             state_dir: &config.state_dir,
             max_download_bytes: config.max_download_bytes,
@@ -1033,12 +1050,12 @@ program = "/usr/bin/false"
             cli: &cli,
         };
         let package = &config.package[0];
-        assert!(update_package(package, &runtime).is_err());
+        assert!(update_package(package, &runtime).await.is_err());
         let saved = load_state(&state_path(runtime.state_dir, &package.name))?;
         assert_eq!(saved.last_checked_unix, 0);
         assert!(saved.last_attempted_unix > 0);
         // The failed command is no longer invoked on every manager tick.
-        assert!(update_package(package, &runtime).is_ok());
+        assert!(update_package(package, &runtime).await.is_ok());
         // The test also checks that the persisted attempt's interval is real.
         assert!(!super::is_check_due(
             saved.last_checked_unix.max(saved.last_attempted_unix),
