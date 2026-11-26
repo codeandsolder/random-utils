@@ -5,6 +5,7 @@ on:
     branches: [main]
     tags: ["v*"]
   pull_request:
+  merge_group:
   workflow_dispatch:
 
 concurrency:
@@ -98,3 +99,13 @@ jobs:
           else
             gh release create "$tag" dist/* --title "$title" --notes "Write-once release for ${GITHUB_SHA}." --latest
           fi
+
+  merge-gate:
+    name: CI merge gate
+    if: ${{ always() }}
+    needs: [rust-shared-sccache]
+    uses: codeandsolder/ci-workflows/.github/workflows/merge-gate.yml@343303848026ed142e48a6a82e7a889080b99b26 # main
+    with:
+      needs-json: ${{ toJSON(needs) }}
+      expected-results: |
+        [["rust-shared-sccache","success"]]
