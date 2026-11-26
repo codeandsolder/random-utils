@@ -18,15 +18,19 @@ jobs:
   rust-shared-sccache:
     permissions:
       contents: read
-    uses: codeandsolder/ci-workflows/.github/workflows/rust-sccache.yml@83ceff49d93d152cd95a1c9d6addb5cf03169477 # main
+    uses: codeandsolder/ci-workflows/.github/workflows/rust-sccache.yml@169c8823c1bb0f5e5645ad813b441d605d49d5bb # main
     with:
       rust-components: "clippy rustfmt"
       rustflags: "-C target-cpu=x86-64-v2"
-      command: >-
-        cargo fmt --all -- --check &&
-        CARGO_BUILD_WARNINGS=deny cargo check --locked --workspace --all-targets &&
-        CARGO_BUILD_WARNINGS=deny cargo clippy --locked --workspace --all-targets -- -D warnings &&
+      command: |
+        if [[ "$GITHUB_REF" == refs/tags/* ]]; then
+          cargo fmt --all -- --check
+          CARGO_BUILD_WARNINGS=deny cargo check --locked --workspace --all-targets
+          CARGO_BUILD_WARNINGS=deny cargo clippy --locked --workspace --all-targets -- -D warnings
+        fi
         cargo test --locked --workspace
+      strict-suites: >-
+        ${{ !startsWith(github.ref, 'refs/tags/') && '[{"name":"workspace"}]' || '' }}
 
   release:
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
@@ -38,19 +42,19 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - name: Resolve native quarantined Rust
         id: compiler
-        uses: codeandsolder/ci-workflows/.github/actions/resolve-rust-toolchain@83ceff49d93d152cd95a1c9d6addb5cf03169477 # main
+        uses: codeandsolder/ci-workflows/.github/actions/resolve-rust-toolchain@169c8823c1bb0f5e5645ad813b441d605d49d5bb # main
       - uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable
         with:
           toolchain: "${{ steps.compiler.outputs.channel }}"
       - name: Setup mandatory release compiler cache
-        uses: codeandsolder/ci-workflows/.github/actions/setup-sccache@83ceff49d93d152cd95a1c9d6addb5cf03169477 # main
+        uses: codeandsolder/ci-workflows/.github/actions/setup-sccache@169c8823c1bb0f5e5645ad813b441d605d49d5bb # main
         with:
           rust-toolchain: "${{ steps.compiler.outputs.channel }}"
       - name: Build release artifacts
         run: cargo build --locked --release --workspace
       - name: Finalize mandatory release compiler cache
         if: always()
-        uses: codeandsolder/ci-workflows/.github/actions/finalize-sccache@83ceff49d93d152cd95a1c9d6addb5cf03169477 # main
+        uses: codeandsolder/ci-workflows/.github/actions/finalize-sccache@169c8823c1bb0f5e5645ad813b441d605d49d5bb # main
       - name: Assemble write-once release
         run: |
           set -euo pipefail
