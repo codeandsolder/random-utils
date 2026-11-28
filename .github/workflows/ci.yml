@@ -19,7 +19,7 @@ jobs:
   rust-shared-sccache:
     permissions:
       contents: read
-    uses: codeandsolder/ci-workflows/.github/workflows/rust-sccache.yml@6beddaa012211f3fbdd57df1f37424b3001b7475 # main
+    uses: codeandsolder/ci-workflows/.github/workflows/rust-sccache.yml@db22785ec97c653cf0ec96b6964ded8158436f3c # main
     with:
       rust-components: "clippy rustfmt"
       rustflags: "-C target-cpu=x86-64-v2"
@@ -43,19 +43,19 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - name: Resolve native quarantined Rust
         id: compiler
-        uses: codeandsolder/ci-workflows/.github/actions/resolve-rust-toolchain@6beddaa012211f3fbdd57df1f37424b3001b7475 # main
+        uses: codeandsolder/ci-workflows/.github/actions/resolve-rust-toolchain@db22785ec97c653cf0ec96b6964ded8158436f3c # main
       - uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable
         with:
           toolchain: "${{ steps.compiler.outputs.channel }}"
       - name: Setup mandatory release compiler cache
-        uses: codeandsolder/ci-workflows/.github/actions/setup-sccache@6beddaa012211f3fbdd57df1f37424b3001b7475 # main
+        uses: codeandsolder/ci-workflows/.github/actions/setup-sccache@db22785ec97c653cf0ec96b6964ded8158436f3c # main
         with:
           rust-toolchain: "${{ steps.compiler.outputs.channel }}"
       - name: Build release artifacts
         run: cargo build --locked --release --workspace
       - name: Finalize mandatory release compiler cache
         if: always()
-        uses: codeandsolder/ci-workflows/.github/actions/finalize-sccache@6beddaa012211f3fbdd57df1f37424b3001b7475 # main
+        uses: codeandsolder/ci-workflows/.github/actions/finalize-sccache@db22785ec97c653cf0ec96b6964ded8158436f3c # main
       - name: Assemble write-once release
         run: |
           set -euo pipefail
@@ -104,7 +104,7 @@ jobs:
     name: CI merge gate
     if: ${{ always() }}
     needs: [rust-shared-sccache]
-    uses: codeandsolder/ci-workflows/.github/workflows/merge-gate.yml@6beddaa012211f3fbdd57df1f37424b3001b7475 # main
+    uses: codeandsolder/ci-workflows/.github/workflows/merge-gate.yml@db22785ec97c653cf0ec96b6964ded8158436f3c # main
     with:
       needs-json: ${{ toJSON(needs) }}
       expected-results: |
